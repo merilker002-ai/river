@@ -1,170 +1,189 @@
-# model_api.py
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from datetime import datetime
 import pandas as pd
 import numpy as np
-import pickle
-import base64
-from river import anomaly, preprocessing
-from typing import List, Dict
-import asyncio
-import aiofiles
-import os
-from contextlib import asynccontextmanager
+from sklearn.ensemble import IsolationForest
+from sklearn.cluster import DBSCAN
+from sklearn.preprocessing import StandardScaler
+import joblib
+import warnings
+warnings.filterwarnings('ignore')
 
-# Model state
-model = None
-learning_stats = {
-    "total_processed": 0,
-    "last_learning": None,
-    "model_size": 0
-}
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup: Load model from GitHub
-    global model
-    model = await load_model_from_github()
-    yield
-    # Shutdown: Save model to GitHub
-    await save_model_to_github(model)
-
-app = FastAPI(title="Su Tüketim AI API", lifespan=lifespan)
-
-class LearningRequest(BaseModel):
-    data: List[Dict]
-    batch_id: str
-
-class PredictionRequest(BaseModel):
-    data: Dict
-
-async def load_model_from_github():
-    """GitHub'dan modeli async olarak yükle"""
-    try:
-        # GitHub REST API ile modeli çek
-        model_url = f"https://raw.githubusercontent.com/merilker002-ai/river/main/models/river_model.pkl"
-        # Bu kısım GitHub API token ile geliştirilebilir
-        return preprocessing.StandardScaler() | anomaly.HalfSpaceTrees(
-            n_estimators=30, height=10, window_size=100, seed=42
+class SuTuketimAnalizModeli:
+    def __init__(self):
+        self.scaler = StandardScaler()
+        self.isolation_forest = IsolationForest(
+            contamination=0.1, 
+            random_state=42,
+            n_estimators=100
         )
-    except:
-        # Yeni model oluştur
-        return preprocessing.StandardScaler() | anomaly.HalfSpaceTrees(
-            n_estimators=30, height=10, window_size=100, seed=42
-        )
-
-async def save_model_to_github(model_obj):
-    """Modeli GitHub'a async olarak kaydet"""
-    try:
-        # Modeli pickle ile serialize et
-        model_bytes = pickle.dumps(model_obj)
-        
-        # Burada GitHub API ile commit yapılacak
-        # Basit versiyon: local'e kaydet (GitHub Actions ile otomatik push)
-        async with aiofiles.open('river_model.pkl', 'wb') as f:
-            await f.write(model_bytes)
-        
-        return True
-    except Exception as e:
-        print(f"Model save error: {e}")
-        return False
-
-@app.post("/incremental-learn")
-async def incremental_learn(request: LearningRequest):
-    """Incremental learning endpoint - BELLEK DOSTU"""
-    global model, learning_stats
+        self.dbscan = DBSCAN(eps=0.5, min_samples=10)
+        self.model_egitildi = False
     
-    if model is None:
-        raise HTTPException(status_code=500, detail="Model not initialized")
+    def veri_on_isleme(self, df):
+        """Veriyi analiz için hazırlar"""
+        # Tarih dönüşümleri
+        df['ILK_OKUMA_TARIHI'] = pd.to_datetime(df['ILK_OKUMA_TARIHI'], errors='coerce')
+        df['OKUMA_TARIHI'] = pd.to_datetime(df['OKUMA_TARIHI'], errors='coerce')
+        
+        # Temel özellik mühendisliği
+        df['OKUMA_PERIYODU_GUN'] = (df['OKUMA_TARIHI'] - df['ILK_OKUMA_TARIHI']).dt.days
+        df['OKUMA_PERIYODU_GUN'] = df['OKUMA_PERIYODU_GUN'].clip(lower=1, upper=365)
+        df['GUNLUK_ORT_TUKETIM_m3'] = df['AKTIF_m3'] / df['OKUMA_PERIYODU_GUN']
+        df['GUNLUK_ORT_TUKETIM_m3'] = df['GUNLUK_ORT_TUKETIM_m3'].clip(lower=0.001, upper=100)
+        
+        # Ek özellikler
+        df['TUKEIM_VARYASYON'] = df.groupby('TESISAT_NO')['AKTIF_m3'].transform('std')
+        df['TUKEIM_ORTALAMA'] = df.groupby('TESISAT_NO')['AKTIF_m3'].transform('mean')
+        df['VARYASYON_KATSAYISI'] = df['TUKEIM_VARYASYON'] / df['TUKEIM_ORTALAMA']
+        df['VARYASYON_KATSAYISI'] = df['VARYASYON_KATSAYISI'].fillna(0)
+        
+        return df
     
-    try:
-        processed_count = 0
-        scores = []
+    def gelismis_davranis_analizi(self, tesisat_verisi):
+        """Gelişmiş davranış analizi yapar"""
+        if len(tesisat_verisi) < 3:
+            return "Yetersiz veri", "Yetersiz kayıt", "Orta", 0
         
-        # Batch processing - memory efficient
-        for record in request.data:
-            features = {
-                "tuketim": float(record.get('AKTIF_m3', 0)),
-                "gunluk_ort": float(record.get('GUNLUK_ORT_TUKETIM_m3', 0)),
-                "tutar": float(record.get('TOPLAM_TUTAR', 0))
-            }
-            
-            # INCREMENTAL LEARNING - tek kayıt
-            score = model.score_one(features)
-            model.learn_one(features)  # ✅ Gerçek incremental
-            
-            scores.append(score)
-            processed_count += 1
-            
-            # Memory management: Her 1000 kayıtta bir istatistik güncelle
-            if processed_count % 1000 == 0:
-                await asyncio.sleep(0.01)  # Async break
+        tuketimler = tesisat_verisi['AKTIF_m3'].values
+        tarihler = tesisat_verisi['OKUMA_TARIHI']
         
-        # Statistics update
-        learning_stats["total_processed"] += processed_count
-        learning_stats["last_learning"] = datetime.now().isoformat()
-        learning_stats["model_size"] = len(pickle.dumps(model))
+        # İstatistiksel özellikler
+        sifir_sayisi = sum(tuketimler == 0)
+        sifir_orani = sifir_sayisi / len(tuketimler)
+        std_dev = np.std(tuketimler) if len(tuketimler) > 1 else 0
+        mean_tuketim = np.mean(tuketimler) if len(tuketimler) > 0 else 0
+        varyasyon_katsayisi = std_dev / mean_tuketim if mean_tuketim > 0 else 0
         
-        # Async model save (non-blocking)
-        asyncio.create_task(save_model_to_github(model))
+        # Trend analizi
+        if len(tuketimler) >= 5:
+            son_bes = tuketimler[-5:]
+            trend_degeri = (son_bes[-1] - son_bes[0]) / son_bes[0] if son_bes[0] > 0 else 0
+        elif len(tuketimler) >= 3:
+            son_uc = tuketimler[-3:]
+            trend_degeri = (son_uc[-1] - son_uc[0]) / son_uc[0] if son_uc[0] > 0 else 0
+        else:
+            trend_degeri = 0
         
-        return {
-            "status": "success",
-            "processed": processed_count,
-            "batch_id": request.batch_id,
-            "avg_score": np.mean(scores) if scores else 0,
-            "memory_usage": f"{learning_stats['model_size'] / 1024:.2f} KB"
+        # Risk puanı hesaplama
+        risk_puan = 0
+        
+        # 1. Sıfır tüketim analizi
+        if sifir_sayisi >= 2:
+            sifir_indisler = np.where(tuketimler == 0)[0]
+            if len(sifir_indisler) >= 2:
+                ardisik_olmayan = sum(np.diff(sifir_indisler) > 1) >= 1
+                if ardisik_olmayan:
+                    risk_puan += 3
+        
+        if sifir_orani > 0.5:
+            risk_puan += 2
+        
+        # 2. Varyasyon analizi
+        if varyasyon_katsayisi > 1.5:
+            risk_puan += 2
+        elif varyasyon_katsayisi > 1.0:
+            risk_puan += 1
+        
+        # 3. Trend analizi
+        if abs(trend_degeri) > 0.3:
+            risk_puan += 2
+        elif abs(trend_degeri) > 0.1:
+            risk_puan += 1
+        
+        # 4. Son dönem sıfır tüketim
+        if tuketimler[-1] == 0 and len(tuketimler) > 1:
+            risk_puan += 2
+        
+        # 5. Anormal yüksek tüketim
+        if mean_tuketim > 50:
+            risk_puan += 2
+        elif mean_tuketim > 20:
+            risk_puan += 1
+        
+        # Risk seviyesi belirleme
+        if risk_puan >= 5:
+            risk_seviyesi = "Yüksek"
+        elif risk_puan >= 3:
+            risk_seviyesi = "Orta"
+        else:
+            risk_seviyesi = "Düşük"
+        
+        # Şüpheli dönem tespiti
+        supheli_donemler = []
+        if sifir_sayisi > 0:
+            for idx in np.where(tuketimler == 0)[0]:
+                tarih_obj = pd.Timestamp(tarihler.iloc[idx])
+                supheli_donemler.append(tarih_obj.strftime('%m/%Y'))
+        
+        # Yorum oluşturma
+        if risk_seviyesi == "Yüksek":
+            yorum = self._yuksek_risk_yorumu_olustur(tuketimler, sifir_sayisi, varyasyon_katsayisi, trend_degeri)
+        elif risk_seviyesi == "Orta":
+            yorum = self._orta_risk_yorumu_olustur(tuketimler, sifir_sayisi, varyasyon_katsayisi)
+        else:
+            yorum = self._dusuk_risk_yorumu_olustur()
+        
+        return yorum, ", ".join(supheli_donemler) if supheli_donemler else "Yok", risk_seviyesi, risk_puan
+    
+    def _yuksek_risk_yorumu_olustur(self, tuketimler, sifir_sayisi, varyasyon_katsayisi, trend_degeri):
+        """Yüksek risk için yorum oluşturur"""
+        yorumlar = []
+        
+        if sifir_sayisi >= 2:
+            yorumlar.append("Düzensiz sıfır tüketim paterni")
+        if varyasyon_katsayisi > 1.5:
+            yorumlar.append("Yüksek tüketim dalgalanması")
+        if abs(trend_degeri) > 0.3:
+            yorumlar.append(f"{'Yükselen' if trend_degeri > 0 else 'Düşen'} tüketim trendi")
+        if np.mean(tuketimler) > 50:
+            yorumlar.append("Anormal yüksek tüketim")
+        
+        return " | ".join(yorumlar) + " - Acil inceleme önerilir"
+    
+    def _orta_risk_yorumu_olustur(self, tuketimler, sifir_sayisi, varyasyon_katsayisi):
+        """Orta risk için yorum oluşturur"""
+        if sifir_sayisi == 1:
+            return "Tekil sıfır tüketim - İzleme gerektirir"
+        elif varyasyon_katsayisi > 1.0:
+            return "Orta seviyede tüketim dalgalanması"
+        else:
+            return "Tüketim davranışında küçük tutarsızlıklar"
+    
+    def _dusuk_risk_yorumu_olustur(self):
+        """Düşük risk için yorum oluşturur"""
+        yorumlar = [
+            "Normal tüketim paterni",
+            "Stabil tüketim alışkanlığı",
+            "Tutarlı tüketim davranışı"
+        ]
+        return np.random.choice(yorumlar)
+    
+    def anomaly_detection(self, df):
+        """Anomali tespiti yapar"""
+        features = df[['AKTIF_m3', 'GUNLUK_ORT_TUKETIM_m3', 'VARYASYON_KATSAYISI']].fillna(0)
+        
+        # Standardize features
+        features_scaled = self.scaler.fit_transform(features)
+        
+        # Isolation Forest ile anomali tespiti
+        anomalies = self.isolation_forest.fit_predict(features_scaled)
+        df['ANOMALY_SCORE'] = anomalies
+        
+        return df
+    
+    def save_model(self, filepath):
+        """Modeli kaydeder"""
+        model_data = {
+            'scaler': self.scaler,
+            'isolation_forest': self.isolation_forest
         }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/predict")
-async def predict_anomaly(request: PredictionRequest):
-    """Anomali tahmini endpoint"""
-    global model
+        joblib.dump(model_data, filepath)
     
-    if model is None:
-        raise HTTPException(status_code=500, detail="Model not initialized")
-    
-    try:
-        features = {
-            "tuketim": float(request.data.get('AKTIF_m3', 0)),
-            "gunluk_ort": float(request.data.get('GUNLUK_ORT_TUKETIM_m3', 0)),
-            "tutar": float(request.data.get('TOPLAM_TUTAR', 0))
-        }
-        
-        score = model.score_one(features)
-        
-        return {
-            "score": score,
-            "risk_level": "Yüksek" if score > 0.7 else "Orta" if score > 0.4 else "Düşük",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    def load_model(self, filepath):
+        """Modeli yükler"""
+        model_data = joblib.load(filepath)
+        self.scaler = model_data['scaler']
+        self.isolation_forest = model_data['isolation_forest']
+        self.model_egitildi = True
 
-@app.get("/model-info")
-async def get_model_info():
-    """Model bilgilerini getir"""
-    return {
-        "status": "active" if model else "inactive",
-        "stats": learning_stats,
-        "model_type": "River HalfSpaceTrees",
-        "last_update": learning_stats.get("last_learning", "Never")
-    }
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "model_loaded": model is not None,
-        "timestamp": datetime.now().isoformat()
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# Global model instance
+analiz_modeli = SuTuketimAnalizModeli()
