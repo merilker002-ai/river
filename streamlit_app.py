@@ -440,11 +440,12 @@ with tab3:
             st.subheader("Filtreleme Seçenekleri")
             
             # Tüketim Slider
+            max_tuketim = int(son_okumalar['AKTIF_m3'].max()) if len(son_okumalar) > 0 else 100
             tuketim_range = st.slider(
                 "Tüketim Aralığı (m³)",
                 min_value=0,
-                max_value=int(son_okumalar['AKTIF_m3'].max()) if len(son_okumalar) > 0 else 100,
-                value=[0, 100],
+                max_value=max_tuketim,
+                value=[0, min(100, max_tuketim)],
                 help="Tüketim değerine göre filtreleme yapın"
             )
             
@@ -519,13 +520,14 @@ with tab4:
         
         # Korelasyon Matrisi
         numeric_cols = son_okumalar.select_dtypes(include=[np.number]).columns
-        corr_matrix = son_okumalar[numeric_cols].corr()
-        
-        fig8 = px.imshow(corr_matrix, 
-                       title='Korelasyon Matrisi',
-                       color_continuous_scale='RdBu_r',
-                       aspect="auto")
-        st.plotly_chart(fig8, use_container_width=True)
+        if len(numeric_cols) > 0:
+            corr_matrix = son_okumalar[numeric_cols].corr()
+            
+            fig8 = px.imshow(corr_matrix, 
+                           title='Korelasyon Matrisi',
+                           color_continuous_scale='RdBu_r',
+                           aspect="auto")
+            st.plotly_chart(fig8, use_container_width=True)
         
         # Aykırı Değer Analizi
         fig9 = px.box(son_okumalar, y='AKTIF_m3', 
