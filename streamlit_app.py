@@ -28,15 +28,92 @@ st.set_page_config(
 )
 
 # ======================================================================
-# 📊 AKILLI VERİ İŞLEME FONKSİYONLARI
+# 📊 AKILLI VERİ İŞLEME FONKSİYONLARI - 1M+ SATIR DESTEKLİ
 # ======================================================================
+
+@st.cache_data(ttl=3600, max_entries=2, show_spinner="Büyük veri seti yükleniyor...")
+def load_million_plus_data(uploaded_file, sampling_ratio=None):
+    """1M+ satır için optimize veri yükleme"""
+    
+    file_size_mb = uploaded_file.size / (1024 * 1024)
+    
+    if file_size_mb > 50:  # 50MB'tan büyük dosya
+        st.warning(f"📁 Büyük dosya tespit edildi: {file_size_mb:.1f} MB")
+        
+        if sampling_ratio is None:
+            # Otomatik örnekleme oranı belirle
+            if file_size_mb > 200:
+                sampling_ratio = 0.1  # 200MB+ → %10
+            elif file_size_mb > 100:
+                sampling_ratio = 0.2  # 100-200MB → %20
+            else:
+                sampling_ratio = 0.3  # 50-100MB → %30
+        
+        st.info(f"🎯 %{sampling_ratio*100} örnekleme ile {sampling_ratio:.0%} veri analiz edilecek")
+        
+        # Akıllı örnekleme
+        try:
+            # Chunk'lar halinde oku ve örnekle
+            chunk_size = 50000
+            chunks = pd.read_excel(uploaded_file, chunksize=chunk_size, dtype={'TESISAT_NO': str})
+            
+            sampled_chunks = []
+            for chunk in chunks:
+                if np.random.random() < sampling_ratio:
+                    sampled_chunks.append(chunk)
+                
+                # Maksimum 500K satır (performans için)
+                total_sampled = sum(len(c) for c in sampled_chunks)
+                if total_sampled > 500000:
+                    st.info("⏹️ 500K satır limite ulaşıldı")
+                    break
+            
+            df = pd.concat(sampled_chunks, ignore_index=True)
+            st.success(f"✅ {len(df):,} satır örneklenerek yüklendi")
+            
+        except Exception as e:
+            st.error(f"❌ Örnekleme hatası: {e}")
+            # Fallback: direkt okuma
+            df = pd.read_excel(uploaded_file, dtype={'TESISAT_NO': str})
+            df = df.sample(frac=min(sampling_ratio, 0.3))  # Güvenli örnekleme
+    
+    else:
+        # Küçük dosya - direkt yükle
+        df = pd.read_excel(uploaded_file, dtype={'TESISAT_NO': str})
+    
+    return df
+
+def calculate_realistic_consumption(df):
+    """GERÇEKÇİ günlük tüketim hesaplama - KRİTİK DÜZELTME"""
+    # Her okuma bir AY'lık tüketim! Bu yüzden:
+    # Günlük ortalama = Aylık tüketim / 30 gün
+    
+    # Önce temel periyot (30 gün - standart ay)
+    df['OKUMA_PERIYODU_GUN'] = 30
+    
+    # Tarih farkına göre daha doğru periyot (opsiyonel)
+    mask = df['OKUMA_TARIHI'].notna() & df['ILK_OKUMA_TARIHI'].notna()
+    df.loc[mask, 'OKUMA_PERIYODU_GUN'] = (df.loc[mask, 'OKUMA_TARIHI'] - df.loc[mask, 'ILK_OKUMA_TARIHI']).dt.days
+    
+    # Gerçekçi periyot sınırları (25-35 gün arası)
+    df['OKUMA_PERIYODU_GUN'] = df['OKUMA_PERIYODU_GUN'].clip(lower=25, upper=35)
+    
+    # GERÇEK günlük ortalama = Aylık tüketim / gün sayısı
+    df['GUNLUK_ORT_TUKETIM_m3'] = df['AKTIF_m3'] / df['OKUMA_PERIYODU_GUN']
+    
+    # Gerçekçi sınırlar (ev/işyeri tüketimi için)
+    # Günlük 50m³'den fazla şüpheli, maksimum 100m³
+    df['GUNLUK_ORT_TUKETIM_m3'] = df['GUNLUK_ORT_TUKETIM_m3'].clip(lower=0.001, upper=100)
+    
+    return df
 
 @st.cache_data(ttl=3600)
 def load_and_analyze_data_adaptive(uploaded_file, zone_file):
-    """Adaptive analiz ile veri işleme"""
+    """Adaptive analiz ile veri işleme - 1M+ SATIR DESTEKLİ"""
     try:
-        df = pd.read_excel(uploaded_file, dtype={'TESISAT_NO': str})
-        st.success(f"✅ Ana veri başarıyla yüklendi: {len(df)} kayıt")
+        # Büyük veri yükleme
+        df = load_million_plus_data(uploaded_file)
+        st.success(f"✅ Ana veri başarıyla yüklendi: {len(df):,} kayıt")
     except Exception as e:
         st.error(f"❌ Ana dosya okuma hatası: {e}")
         return None, None, None, None
@@ -64,11 +141,8 @@ def load_and_analyze_data_adaptive(uploaded_file, zone_file):
             df[col] = pd.to_numeric(df[col], errors='coerce')
             df[col] = df[col].fillna(0)
     
-    # Temel özellik mühendisliği
-    df['OKUMA_PERIYODU_GUN'] = (df['OKUMA_TARIHI'] - df['ILK_OKUMA_TARIHI']).dt.days
-    df['OKUMA_PERIYODU_GUN'] = df['OKUMA_PERIYODU_GUN'].clip(lower=1, upper=365)
-    df['GUNLUK_ORT_TUKETIM_m3'] = df['AKTIF_m3'] / df['OKUMA_PERIYODU_GUN']
-    df['GUNLUK_ORT_TUKETIM_m3'] = df['GUNLUK_ORT_TUKETIM_m3'].clip(lower=0.001, upper=100)
+    # KRİTİK DÜZELTME: Gerçekçi günlük tüketim hesaplama
+    df = calculate_realistic_consumption(df)
     
     # Zone veri dosyasını oku
     kullanici_zone_verileri = {}
@@ -96,30 +170,38 @@ def load_and_analyze_data_adaptive(uploaded_file, zone_file):
     # Son okumaları al
     son_okumalar = df.sort_values('OKUMA_TARIHI').groupby('TESISAT_NO').last().reset_index()
 
-    # ADAPTIVE analiz yap
+    # ADAPTIVE analiz yap - OPTİMİZE
     if len(son_okumalar) > 0:
         st.info("🧠 Adaptive AI analizi yapılıyor ve ÖĞRENİYOR...")
         progress_bar = st.progress(0)
         davranis_sonuclari = []
         
         total_tesisat = len(son_okumalar)
-        for i, (idx, row) in enumerate(son_okumalar.iterrows()):
-            tesisat_verisi = df[df['TESISAT_NO'] == row['TESISAT_NO']].sort_values('OKUMA_TARIHI')
+        
+        # Büyük veri setleri için batch işleme
+        batch_size = 100
+        for batch_start in range(0, total_tesisat, batch_size):
+            batch_end = min(batch_start + batch_size, total_tesisat)
+            batch_data = son_okumalar.iloc[batch_start:batch_end]
             
-            # Adaptive analiz - ÖĞRENME ENTEGRE
-            analiz_sonucu = adaptive_model.gelismis_davranis_analizi(tesisat_verisi)
+            for i, (idx, row) in enumerate(batch_data.iterrows()):
+                tesisat_verisi = df[df['TESISAT_NO'] == row['TESISAT_NO']].sort_values('OKUMA_TARIHI')
+                
+                # Adaptive analiz - ÖĞRENME ENTEGRE
+                analiz_sonucu = adaptive_model.gelismis_davranis_analizi(tesisat_verisi)
+                
+                davranis_sonuclari.append({
+                    'TESISAT_NO': row['TESISAT_NO'],
+                    'DAVRANIS_YORUMU': analiz_sonucu['yorum'],
+                    'SUPHELI_DONEMLER': analiz_sonucu['supheli_donemler'],
+                    'RISK_SEVIYESI': analiz_sonucu['risk_seviyesi'],
+                    'RISK_PUANI': analiz_sonucu['risk_puan'],
+                    'PATTERN_DATA': analiz_sonucu.get('pattern_data', {})
+                })
             
-            davranis_sonuclari.append({
-                'TESISAT_NO': row['TESISAT_NO'],
-                'DAVRANIS_YORUMU': analiz_sonucu['yorum'],
-                'SUPHELI_DONEMLER': analiz_sonucu['supheli_donemler'],
-                'RISK_SEVIYESI': analiz_sonucu['risk_seviyesi'],
-                'RISK_PUANI': analiz_sonucu['risk_puan'],
-                'PATTERN_DATA': analiz_sonucu.get('pattern_data', {})
-            })
-            
-            if i % 100 == 0 and total_tesisat > 0:
-                progress_bar.progress(min((i + 1) / total_tesisat, 1.0))
+            # İlerleme güncelleme
+            progress = min((batch_end) / total_tesisat, 1.0)
+            progress_bar.progress(progress)
 
         progress_bar.progress(1.0)
         davranis_df = pd.DataFrame(davranis_sonuclari)
@@ -290,9 +372,8 @@ if st.sidebar.button("🎮 Gelişmiş Demo Modu"):
     df_detayli['AKTIF_m3'] = pd.to_numeric(df_detayli['AKTIF_m3'], errors='coerce')
     df_detayli['TOPLAM_TUTAR'] = pd.to_numeric(df_detayli['TOPLAM_TUTAR'], errors='coerce')
     
-    # Temel özellik mühendisliği
-    df_detayli['OKUMA_PERIYODU_GUN'] = 300
-    df_detayli['GUNLUK_ORT_TUKETIM_m3'] = df_detayli['AKTIF_m3'] / df_detayli['OKUMA_PERIYODU_GUN']
+    # GERÇEKÇİ günlük tüketim hesaplama
+    df_detayli = calculate_realistic_consumption(df_detayli)
     
     # Son okumaları al
     son_okumalar = df_detayli.sort_values('OKUMA_TARIHI').groupby('TESISAT_NO').last().reset_index()
@@ -376,7 +457,7 @@ with tab1:
         with col1:
             if 'GUNLUK_ORT_TUKETIM_m3' in son_okumalar.columns:
                 fig1 = px.histogram(son_okumalar, x='GUNLUK_ORT_TUKETIM_m3', 
-                                  title='Öğrenilmiş Günlük Tüketim Dağılımı',
+                                  title='Gerçekçi Günlük Tüketim Dağılımı',
                                   labels={'GUNLUK_ORT_TUKETIM_m3': 'Günlük Tüketim (m³)'})
                 st.plotly_chart(fig1, use_container_width=True)
         
@@ -487,7 +568,7 @@ with tab4:
     with progress_col1:
         # Gözlem ilerlemesi
         total_obs = stats['toplam_gozlem']
-        max_obs = 1000
+        max_obs = 10000  # 1000 → 10000
         obs_progress = min(total_obs / max_obs, 1.0)
         st.progress(obs_progress, text=f"Gözlem İlerlemesi: {total_obs}/{max_obs}")
     
@@ -542,4 +623,4 @@ with tab4:
 
 # Footer
 st.markdown("---")
-st.markdown("🚀 **Hemen Öğrenen Su Tüketim AI Sistemi** | Sentetik Veri + Aktif Öğrenme")
+st.markdown("🚀 **Hemen Öğrenen Su Tüketim AI Sistemi v2.0** | 1M+ Satır Desteği | Optimize Bellek Yönetimi")
