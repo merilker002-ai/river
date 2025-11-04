@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -53,8 +52,11 @@ def load_or_create_river_model():
             return model
         except Exception as e:
             st.warning(f"Model yüklenirken hata: {e}. Yeni model oluşturuluyor.")
-    # Create new model
-    model = preprocessing.StandardScaler() | anomaly.HalfSpaceTrees(seed=42, n_estimators=40)
+    # Create new model (try to be compatible with multiple river versions)
+    try:
+        model = preprocessing.StandardScaler() | anomaly.HalfSpaceTrees(seed=42, n_estimators=40)
+    except Exception:
+        model = preprocessing.StandardScaler() | anomaly.HalfSpaceTrees(seed=42)
     st.info("🆕 Yeni River modeli oluşturuldu.")
     return model
 
@@ -129,12 +131,13 @@ def load_and_analyze_data(uploaded_file, zone_file):
     
     # Zone veri dosyasını oku
     kullanici_zone_verileri = {}
+    zone_excel_df = None
     if zone_file is not None:
         try:
             zone_excel_df = pd.read_excel(zone_file)
             st.success(f"✅ Zone veri dosyası başarıyla yüklendi: {len(zone_excel_df)} kayıt")
             
-            # Zone verilerini işle
+            # Zone verilerini işle (kullanici_zone_verileri için)
             for idx, row in zone_excel_df.iterrows():
                 # Karne no ve adını ayır
                 if 'KARNE NO VE ADI' in row:
@@ -292,8 +295,11 @@ def load_and_analyze_data(uploaded_file, zone_file):
 
     return df, son_okumalar, zone_analizi, kullanici_zone_verileri
 
+
+
+
 # ======================================================================
-# STREAMLIT ARAYÜZ
+# STREAMLIT ARAYÜZ (Güncel: incremental uploader kaldırıldı, zone -> otomatik öğrenme)
 # ======================================================================
 st.title("💧 Su Tüketim Davranış Analiz Dashboard (River Entegre)")
 
@@ -311,16 +317,10 @@ zone_file = st.sidebar.file_uploader(
     help="Zone bilgilerini içeren Excel dosyasını yükleyin"
 )
 
-# Yeni veri için incremental uploader (CSV veya XLSX)
-incremental_file = st.sidebar.file_uploader(
-    "Yeni veri yükle (incremental CSV/XLSX) - model bu verilerle satır satır öğrenecek",
-    type=["csv", "xlsx"]
-)
-
 # Model yönetimi
 model = load_or_create_river_model() if river_available() else None
 if not river_available():
-    st.sidebar.warning("River kütüphanesi yüklenmemiş. Online öğrenme çalışmaz. `pip install river` yapın.")
+    st.sidebar.warning("River kütüphanesi yüklenmemiş. Online öğrenme çalışmaz. `requirements.txt` içine 'river==0.21.0' ekleyin.")
 
 if st.sidebar.button("🔁 Modeli Sıfırla (sil)"):
     try:
@@ -331,7 +331,7 @@ if st.sidebar.button("🔁 Modeli Sıfırla (sil)"):
     except Exception as e:
         st.sidebar.error(f"Model sıfırlanırken hata: {e}")
 
-# Demo butonu
+# Demo butonu (orijinal davranışı koruyor)
 if st.sidebar.button("🎮 Demo Modunda Çalıştır"):
     st.info("Demo modu aktif! Örnek verilerle çalışılıyor...")
     np.random.seed(42)
@@ -370,46 +370,60 @@ if st.sidebar.button("🎮 Demo Modunda Çalıştır"):
     }).reset_index()
     zone_analizi.columns = ['KARNE_NO', 'TESISAT_SAYISI', 'TOPLAM_TUKETIM', 'TOPLAM_GELIR']
     
+    # Demo: river güncelle (opsiyonel)
+    if river_available():
+        try:
+            demo_zone_df = df.copy()
+            scores, model = update_model_with_new_data(demo_zone_df, model)
+            # merge scores -> son_okumalar (tesisat bazında ortalama) - benzetme demo için
+            demo_scores = pd.DataFrame({'TESISAT_NO': demo_zone_df['TESISAT_NO'], 'RIVER_SCORE': scores})
+            mean_scores = demo_scores.groupby('TESISAT_NO')['RIVER_SCORE'].mean().reset_index().rename(columns={'RIVER_SCORE': 'RIVER_SCORE_MEAN'})
+            son_okumalar = son_okumalar.merge(mean_scores, on='TESISAT_NO', how='left')
+            st.sidebar.success(f"🧠 Demo zone verisi ile model güncellendi: {len(demo_zone_df)} satır.")
+        except Exception as e:
+            st.sidebar.warning(f"Demo sırasında River güncelleme hatası: {e}")
+    
     st.success("✅ Demo verisi başarıyla oluşturuldu!")
 
-elif uploaded_file is not None:
+# Eğer dosya yüklendiyse veri yükleme ve analiz
+if uploaded_file is not None:
     df, son_okumalar, zone_analizi, kullanici_zone_verileri = load_and_analyze_data(uploaded_file, zone_file)
 else:
     st.warning("⚠️ Lütfen Excel dosyalarını yükleyin veya Demo modunu kullanın")
     st.stop()
 
-# Eğer incremental veri yüklendiyse, modeli satır satır güncelle ve skor üret
-if incremental_file is not None and model is not None:
-    st.sidebar.info("Yeni veri işlendi: model bu verilerle öğreniyor...")
+# ====== BURADA: Zone dosyası yüklendiyse otomatik River öğrenmesini tetikle ======
+if zone_file is not None and river_available():
     try:
-        if incremental_file.name.lower().endswith(".csv"):
-            inc_df = pd.read_csv(incremental_file)
-        else:
-            inc_df = pd.read_excel(incremental_file)
-        # Eğer OKUMA tarihleri veya ILK_OKUMA yoksa, basit doldurma
-        if 'OKUMA_TARIHI' in inc_df.columns and not pd.api.types.is_datetime64_any_dtype(inc_df['OKUMA_TARIHI']):
-            inc_df['OKUMA_TARIHI'] = pd.to_datetime(inc_df['OKUMA_TARIHI'], errors='coerce')
-        if 'ILK_OKUMA_TARIHI' in inc_df.columns and not pd.api.types.is_datetime64_any_dtype(inc_df['ILK_OKUMA_TARIHI']):
-            inc_df['ILK_OKUMA_TARIHI'] = pd.to_datetime(inc_df['ILK_OKUMA_TARIHI'], errors='coerce')
-        # Eğer günlük ortalama yoksa hesapla (basit)
-        if 'GUNLUK_ORT_TUKETIM_m3' not in inc_df.columns and 'OKUMA_PERIYODU_GUN' in inc_df.columns:
-            inc_df['GUNLUK_ORT_TUKETIM_m3'] = inc_df['AKTIF_m3'] / inc_df['OKUMA_PERIYODU_GUN'].clip(lower=1)
-        elif 'GUNLUK_ORT_TUKETIM_m3' not in inc_df.columns:
-            inc_df['GUNLUK_ORT_TUKETIM_m3'] = inc_df['AKTIF_m3']  # fallback
+        # yeniden zone_df oku (orijinal load_and_analyze_data sadece özetlediği için)
+        zone_df_for_learning = pd.read_excel(zone_file)
+        # prepare zone_df_for_learning columns to include feature_map keys if necessary
+        # (expects AKTIF_m3, GUNLUK_ORT_TUKETIM_m3, TOPLAM_TUTAR or we compute simple proxies)
+        if 'GUNLUK_ORT_TUKETIM_m3' not in zone_df_for_learning.columns:
+            # try to compute if there are period columns, else fallback to AKTIF_m3
+            if 'OKUMA_PERIYODU_GUN' in zone_df_for_learning.columns and 'AKTIF_m3' in zone_df_for_learning.columns:
+                zone_df_for_learning['GUNLUK_ORT_TUKETIM_m3'] = zone_df_for_learning['AKTIF_m3'] / zone_df_for_learning['OKUMA_PERIYODU_GUN'].clip(lower=1)
+            else:
+                zone_df_for_learning['GUNLUK_ORT_TUKETIM_m3'] = zone_df_for_learning.get('AKTIF_m3', 0.0)
+        if 'TOPLAM_TUTAR' not in zone_df_for_learning.columns:
+            zone_df_for_learning['TOPLAM_TUTAR'] = zone_df_for_learning.get('TOPLAM_TUTAR', 0.0)
+        # ensure AKTIF_m3 exists
+        if 'AKTIF_m3' not in zone_df_for_learning.columns:
+            zone_df_for_learning['AKTIF_m3'] = zone_df_for_learning.get('AKTIF_m3', 0.0)
         
-        scores, model = update_model_with_new_data(inc_df, model)
-        inc_df['RIVER_SCORE'] = scores
-        st.sidebar.success(f"🧠 Model {len(inc_df)} satırı öğrendi. Son skorlardan örnek: {inc_df['RIVER_SCORE'].head().tolist()}")
+        scores, model = update_model_with_new_data(zone_df_for_learning, model)
+        zone_df_for_learning['RIVER_SCORE'] = scores
+        st.sidebar.success(f"🧠 Zone dosyası ile River modeli güncellendi: {len(zone_df_for_learning)} satır.")
         
-        # Merge incremental scores into son_okumalar where TESISAT_NO matches last record
-        # For simplicity, take mean score per TESISAT_NO
+        # Merge incremental-like scores into son_okumalar as mean per TESISAT_NO if column exists
         try:
-            mean_scores = inc_df.groupby('TESISAT_NO')['RIVER_SCORE'].mean().reset_index().rename(columns={'RIVER_SCORE': 'RIVER_SCORE_MEAN'})
-            son_okumalar = son_okumalar.merge(mean_scores, on='TESISAT_NO', how='left')
+            if 'TESISAT_NO' in zone_df_for_learning.columns:
+                mean_scores = zone_df_for_learning.groupby('TESISAT_NO')['RIVER_SCORE'].mean().reset_index().rename(columns={'RIVER_SCORE': 'RIVER_SCORE_MEAN'})
+                son_okumalar = son_okumalar.merge(mean_scores, on='TESISAT_NO', how='left')
         except Exception:
             pass
     except Exception as e:
-        st.sidebar.error(f"Yeni veri işlerken hata: {e}")
+        st.sidebar.error(f"River ile otomatik öğrenme sırasında hata: {e}")
 
 # Genel Metrikler
 if son_okumalar is not None:
@@ -441,6 +455,7 @@ if son_okumalar is not None:
             value=f"{yuksek_riskli}"
         )
 
+# (Diğer tüm sekmeler ve görselleştirmeler aynen korunmuştur)
 # Tab Menü (görselleştirme temel yapı aynı)
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📈 Genel Görünüm", 
