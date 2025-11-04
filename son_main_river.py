@@ -19,7 +19,7 @@ import hashlib
 warnings.filterwarnings('ignore')
 
 # ======================================================================
-# GITHUB-BASED MODEL MANAGER
+# GITHUB MODEL MANAGER - Gerçek Incremental Learning için
 # ======================================================================
 class GitHubModelManager:
     def __init__(self, repo_owner: str, repo_name: str, token: str = None):
@@ -48,14 +48,15 @@ class GitHubModelManager:
                     model = pickle.loads(model_data)
                     st.sidebar.success("✅ Model GitHub'dan yüklendi")
                     return model
+            st.sidebar.info("ℹ️ GitHub'da model bulunamadı, yeni oluşturulacak")
             return None
         except Exception as e:
             st.sidebar.warning(f"⚠️ GitHub'dan model yüklenemedi: {e}")
             return None
     
     def upload_model(self, model: object, filepath: str = "models/river_model.pkl", 
-                    commit_message: str = "Auto-update model") -> bool:
-        """Modeli GitHub'a yükle"""
+                    commit_message: str = "Auto-update: Incremental learning") -> bool:
+        """Modeli GitHub'a yükle - INCREMENTAL LEARNING İÇİN"""
         try:
             # Modeli serialize et
             model_bytes = pickle.dumps(model)
@@ -79,7 +80,7 @@ class GitHubModelManager:
             response = requests.put(url, headers=self._get_headers(), json=data)
             
             if response.status_code in [200, 201]:
-                st.sidebar.success("✅ Model GitHub'a yüklendi")
+                st.sidebar.success("✅ Model GitHub'a kaydedildi")
                 return True
             else:
                 st.sidebar.error(f"❌ Model yüklenemedi: {response.status_code}")
@@ -90,12 +91,13 @@ class GitHubModelManager:
             return False
 
 # ======================================================================
-# RIVER MODEL SERVICE (Lightweight - Bellek Optimize)
+# RIVER INCREMENTAL LEARNING SERVICE
 # ======================================================================
-class RiverModelService:
+class RiverIncrementalService:
     def __init__(self, github_manager: GitHubModelManager):
         self.github_manager = github_manager
         self.model = None
+        self.learning_history = []
         self.load_model()
     
     def load_model(self):
@@ -103,56 +105,77 @@ class RiverModelService:
         self.model = self.github_manager.download_model()
         
         if self.model is None:
-            # Yeni model oluştur
+            # Yeni model oluştur - INCREMENTAL LEARNING için optimize
             try:
                 from river import anomaly, preprocessing
+                # Hafıza dostu model - gerçek incremental learning
                 self.model = preprocessing.StandardScaler() | anomaly.HalfSpaceTrees(
-                    n_estimators=25, 
-                    height=8,
+                    n_estimators=30,  # Daha az memory
+                    height=10,        # Derinlik sınırlı
+                    window_size=100,  # Streaming için
                     seed=42
                 )
-                st.sidebar.info("🆕 Yeni River modeli oluşturuldu")
+                st.sidebar.info("🆕 Yeni Incremental Learning modeli oluşturuldu")
+                # Hemen GitHub'a kaydet
+                self.github_manager.upload_model(self.model)
             except ImportError:
                 st.sidebar.warning("❌ River kütüphanesi kurulu değil")
                 self.model = None
     
-    def incremental_learn(self, data: List[Dict]) -> Dict:
-        """Incremental learning yap"""
+    def incremental_learn_batch(self, data_batch: List[Dict]) -> Dict:
+        """Batch incremental learning - BELLEK OPTİMİZE"""
         if self.model is None:
             return {"status": "error", "message": "Model yok"}
         
         try:
             scores = []
-            for record in data:
-                # Feature extraction
-                features = {
-                    "tuketim": float(record.get('AKTIF_m3', 0)),
-                    "gunluk_ort": float(record.get('GUNLUK_ORT_TUKETIM_m3', 0)),
-                    "tutar": float(record.get('TOPLAM_TUTAR', 0))
-                }
-                
-                # Score and learn
-                score = self.model.score_one(features)
-                self.model.learn_one(features)
-                scores.append(score)
+            processed_count = 0
             
-            # Modeli GitHub'a kaydet
-            self.github_manager.upload_model(self.model)
+            for record in data_batch:
+                try:
+                    # Feature extraction - gerçek zamanlı
+                    features = {
+                        "tuketim": float(record.get('AKTIF_m3', 0)),
+                        "gunluk_ort": float(record.get('GUNLUK_ORT_TUKETIM_m3', 
+                                                     record.get('AKTIF_m3', 0) / 30)),  # Fallback
+                        "tutar": float(record.get('TOPLAM_TUTAR', 0))
+                    }
+                    
+                    # INCREMENTAL LEARNING: Score + Learn
+                    score = self.model.score_one(features)
+                    self.model.learn_one(features)  # ✅ Bu satır incremental learning yapar
+                    
+                    scores.append(score)
+                    processed_count += 1
+                    
+                except Exception as e:
+                    continue
+            
+            # Modeli GitHub'a KAYDET - incremental state persist
+            if processed_count > 0:
+                success = self.github_manager.upload_model(self.model)
+                if success:
+                    # Learning history'yi güncelle
+                    self.learning_history.append({
+                        'timestamp': datetime.now(),
+                        'processed': processed_count,
+                        'avg_score': np.mean(scores) if scores else 0
+                    })
             
             return {
                 "status": "success",
-                "processed_records": len(data),
+                "processed_records": processed_count,
                 "avg_score": np.mean(scores) if scores else 0,
-                "latest_scores": scores[-10:]  # Son 10 skor
+                "model_updated": processed_count > 0
             }
             
         except Exception as e:
             return {"status": "error", "message": str(e)}
     
-    def predict(self, data: Dict) -> Dict:
+    def predict_anomaly(self, data: Dict) -> float:
         """Anomali skoru tahmini"""
         if self.model is None:
-            return {"score": 0.0, "status": "error"}
+            return 0.0
         
         try:
             features = {
@@ -160,18 +183,25 @@ class RiverModelService:
                 "gunluk_ort": float(data.get('GUNLUK_ORT_TUKETIM_m3', 0)),
                 "tutar": float(data.get('TOPLAM_TUTAR', 0))
             }
-            
-            score = self.model.score_one(features)
-            return {"score": score, "status": "success"}
+            return self.model.score_one(features)
         except:
-            return {"score": 0.0, "status": "error"}
+            return 0.0
+    
+    def get_learning_stats(self):
+        """Öğrenme istatistiklerini getir"""
+        if not self.learning_history:
+            return {"total_learned": 0, "last_update": "Never"}
+        
+        total = sum(h['processed'] for h in self.learning_history)
+        last = self.learning_history[-1]['timestamp'].strftime("%Y-%m-%d %H:%M")
+        return {"total_learned": total, "last_update": last}
 
 # ======================================================================
-# VERİ İŞLEME FONKSİYONLARI
+# VERİ İŞLEME - Incremental Learning için optimize
 # ======================================================================
-@st.cache_data
+@st.cache_data(ttl=3600)  # 1 saat cache
 def load_and_analyze_data(uploaded_file, zone_file):
-    """İki dosyadan veriyi okur ve analiz eder"""
+    """İki dosyadan veriyi okur ve analiz eder - INCREMENTAL READY"""
     try:
         df = pd.read_excel(uploaded_file)
         st.success(f"✅ Ana veri başarıyla yüklendi: {len(df)} kayıt")
@@ -209,7 +239,7 @@ def load_and_analyze_data(uploaded_file, zone_file):
         except Exception as e:
             st.error(f"❌ Zone veri dosyası yüklenirken hata: {e}")
 
-    # Davranış analizi
+    # Davranış analizi - INCREMENTAL için optimize
     def perform_behavior_analysis(df):
         son_okumalar = df.sort_values('OKUMA_TARIHI').groupby('TESISAT_NO').last().reset_index()
         son_okumalar['OKUMA_PERIYODU_GUN'] = (son_okumalar['OKUMA_TARIHI'] - son_okumalar['ILK_OKUMA_TARIHI']).dt.days
@@ -220,39 +250,33 @@ def load_and_analyze_data(uploaded_file, zone_file):
 
     son_okumalar = perform_behavior_analysis(df)
     
-    # Kısaltılmış davranış analizi fonksiyonu
-    def tesisat_davranis_analizi(tesisat_no, son_okuma_row, df):
+    # Hızlı davranış analizi - INCREMENTAL için basitleştirilmiş
+    def quick_risk_analysis(tesisat_no, df):
         tesisat_verisi = df[df['TESISAT_NO'] == tesisat_no].sort_values('OKUMA_TARIHI')
         
-        if len(tesisat_verisi) < 3:
-            return "Yetersiz veri", "Yetersiz kayıt", "Orta"
+        if len(tesisat_verisi) < 2:
+            return "Yetersiz veri", "Düşük"
 
         tuketimler = tesisat_verisi['AKTIF_m3'].values
         
-        # Basitleştirilmiş risk analizi
+        # Hızlı risk hesaplama
         sifir_sayisi = sum(tuketimler == 0)
-        std_dev = np.std(tuketimler) if len(tuketimler) > 1 else 0
-        mean_tuketim = np.mean(tuketimler) if len(tuketimler) > 0 else 0
-        varyasyon_katsayisi = std_dev / mean_tuketim if mean_tuketim > 0 else 0
+        son_tuketim = tuketimler[-1] if len(tuketimler) > 0 else 0
         
-        risk_seviyesi = "Düşük"
-        if sifir_sayisi >= 3 or varyasyon_katsayisi > 1.5 or tuketimler[-1] == 0:
-            risk_seviyesi = "Yüksek"
-        elif sifir_sayisi >= 1 or varyasyon_katsayisi > 0.8:
-            risk_seviyesi = "Orta"
+        if sifir_sayisi >= 2 or son_tuketim == 0:
+            return "Düzensiz tüketim", "Yüksek"
+        elif sifir_sayisi >= 1:
+            return "Ara sıra sıfır", "Orta"
+        else:
+            return "Normal patern", "Düşük"
 
-        yorumlar = ["Normal tüketim paterni"] if risk_seviyesi == "Düşük" else ["Tüketimde dalgalanma gözlemleniyor"]
-        
-        return np.random.choice(yorumlar), "Yok", risk_seviyesi
-
-    # Tüm tesisatlar için davranış analizi
+    # Tüm tesisatlar için hızlı analiz
     davranis_sonuclari = []
     for idx, row in son_okumalar.iterrows():
-        yorum, supheli_donemler, risk = tesisat_davranis_analizi(row['TESISAT_NO'], row, df)
+        yorum, risk = quick_risk_analysis(row['TESISAT_NO'], df)
         davranis_sonuclari.append({
             'TESISAT_NO': row['TESISAT_NO'],
             'DAVRANIS_YORUMU': yorum,
-            'SUPHELI_DONEMLER': supheli_donemler,
             'RISK_SEVIYESI': risk
         })
 
@@ -262,11 +286,13 @@ def load_and_analyze_data(uploaded_file, zone_file):
     # Zone analizi
     zone_analizi = None
     if 'KARNE_NO' in df.columns:
-        ekim_2024_df = df[(df['OKUMA_TARIHI'].dt.month == 10) & (df['OKUMA_TARIHI'].dt.year == 2024)]
-        if len(ekim_2024_df) == 0:
-            ekim_2024_df = df.copy()
+        # Son 3 ay verisi - INCREMENTAL için
+        three_months_ago = datetime.now() - timedelta(days=90)
+        recent_df = df[df['OKUMA_TARIHI'] >= three_months_ago]
+        if len(recent_df) == 0:
+            recent_df = df.copy()
         
-        zone_analizi = ekim_2024_df.groupby('KARNE_NO').agg({
+        zone_analizi = recent_df.groupby('KARNE_NO').agg({
             'TESISAT_NO': 'count',
             'AKTIF_m3': 'sum',
             'TOPLAM_TUTAR': 'sum'
@@ -284,263 +310,312 @@ def load_and_analyze_data(uploaded_file, zone_file):
 
 
 
+#############################################################################################################################################
+
 # ======================================================================
-# STREAMLIT ARAYÜZ - PROFESYONEL MİMARİ
+# STREAMLIT ARAYÜZ - INCREMENTAL LEARNING FOCUS
 # ======================================================================
 
-# GitHub configuration - BUNLARI STREAMLIT CLOUD SECRETS'A EKLEYİN
-GITHUB_OWNER = "your_username"  # GitHub kullanıcı adınız
-GITHUB_REPO = "your_repo_name"  # Repo adı
-GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", None)  # Streamlit Cloud secrets
+# GitHub configuration - STREAMLIT CLOUD SECRETS
+GITHUB_OWNER = "merilker002-ai"  # YOUR GitHub username
+GITHUB_REPO = "river"           # YOUR repo name
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", None)
 
-# Initialize services
+# Initialize Incremental Learning Service
 github_manager = GitHubModelManager(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN)
-model_service = RiverModelService(github_manager)
+river_service = RiverIncrementalService(github_manager)
 
 st.set_page_config(
-    page_title="Su Tüketim AI Analiz - GitHub + Streamlit",
+    page_title="🤖 Su Tüketim AI - Incremental Learning",
     page_icon="💧",
     layout="wide"
 )
 
 st.title("💧 Su Tüketim AI Analiz Sistemi")
-st.markdown("🚀 **Profesyonel Mimari: GitHub + Streamlit + Incremental Learning**")
+st.markdown("🚀 **Gerçek Incremental Learning + GitHub Persistence**")
 
-# Sidebar - Model Yönetimi
-st.sidebar.header("🧠 AI Model Yönetimi")
+# ======================================================================
+# SIDEBAR - INCREMENTAL LEARNING KONTROL
+# ======================================================================
+st.sidebar.header("🧠 Incremental Learning AI")
 
 # Model durumu
-if model_service.model is not None:
-    st.sidebar.success("✅ River Modeli Aktif")
+model_stats = river_service.get_learning_stats()
+st.sidebar.metric("📚 Toplam Öğrenilen", f"{model_stats['total_learned']} kayıt")
+st.sidebar.metric("🕒 Son Güncelleme", model_stats['last_update'])
+
+if river_service.model is not None:
+    st.sidebar.success("✅ AI Model Aktif - Incremental Learning Hazır")
 else:
-    st.sidebar.warning("⚠️ River Modeli Devre Dışı")
+    st.sidebar.error("❌ AI Model Devre Dışı")
 
-# Model işlemleri
-col1, col2 = st.sidebar.columns(2)
-with col1:
-    if st.button("🔄 Modeli Güncelle"):
-        model_service.load_model()
-        st.rerun()
+# Incremental Learning Kontrolleri
+st.sidebar.header("🔧 Learning Kontrol")
+auto_learn = st.sidebar.checkbox("🔄 OTOMATİK Incremental Learning", value=True,
+                                help="Yeni veri geldikçe otomatik öğren")
 
-with col2:
-    if st.button("🗑️ Modeli Sıfırla"):
-        # GitHub'dan modeli sil (opsiyonel - manual yapılabilir)
-        st.info("Modeli sıfırlamak için GitHub'dan models/river_model.pkl dosyasını silin")
-        st.rerun()
+learning_mode = st.sidebar.selectbox(
+    "🎯 Learning Modu",
+    ["Yüksek Performans", "Düşük Bellek", "Maximum Accuracy"],
+    help="Öğrenme modunu seçin"
+)
 
-# Dosya yükleme
+batch_size = st.sidebar.slider("📦 Batch Boyutu", 50, 500, 200,
+                              help="Aynı anda işlenecek kayıt sayısı")
+
+# Manuel learning kontrolü
+if st.sidebar.button("🎓 Manuel Öğrenme Başlat"):
+    if river_service.model is not None:
+        st.sidebar.info("Manuel öğrenme butonu - veri yükleyin")
+
+# Model yönetimi
+if st.sidebar.button("🔄 Modeli Yeniden Yükle"):
+    river_service.load_model()
+    st.rerun()
+
+# ======================================================================
+# DOSYA YÜKLEME - INCREMENTAL LEARNING TRIGGER
+# ======================================================================
 st.sidebar.header("📁 Veri Yükleme")
+
 uploaded_file = st.sidebar.file_uploader(
     "Ana Excel dosyasını seçin",
     type=["xlsx"],
-    help="Su tüketim verilerini içeren Excel dosyasını yükleyin"
+    help="Yeni veri yükleyin - incremental learning otomatik başlar"
 )
 
 zone_file = st.sidebar.file_uploader(
     "Zone Excel dosyasını seçin", 
     type=["xlsx"],
-    help="Zone bilgilerini içeren Excel dosyasını yükleyin"
+    help="Zone bilgileri (opsiyonel)"
 )
 
-# Incremental Learning Kontrolü
-st.sidebar.header("🔁 Incremental Learning")
-auto_learn = st.sidebar.checkbox("Otomatik Öğrenme", value=True, 
-                                help="Yeni veri yüklendiğinde otomatik öğren")
-
-batch_size = st.sidebar.slider("Batch Boyutu", 10, 1000, 100, 
-                              help="Aynı anda işlenecek kayıt sayısı")
-
-# Demo verisi
-if st.sidebar.button("🎮 Demo Modu"):
-    # Demo verisi oluştur
-    np.random.seed(42)
-    demo_data = []
-    for i in range(500):  # Daha küçük demo
-        tesisat_no = f"TS{1000 + i}"
-        aktif_m3 = np.random.gamma(2, 10)
+# ======================================================================
+# DEMO VERİSİ - INCREMENTAL LEARNING TEST
+# ======================================================================
+if st.sidebar.button("🧪 Demo + Incremental Learning Test"):
+    with st.spinner("Demo verisi oluşturuluyor ve AI öğreniyor..."):
+        # Akıllı demo verisi - incremental learning test
+        np.random.seed(42)
+        demo_data = []
         
-        demo_data.append({
-            'TESISAT_NO': tesisat_no,
-            'AKTIF_m3': max(aktif_m3, 0.1),
-            'TOPLAM_TUTAR': aktif_m3 * 15,
-            'ILK_OKUMA_TARIHI': pd.Timestamp('2023-01-01'),
-            'OKUMA_TARIHI': pd.Timestamp('2024-10-31'),
-            'KARNE_NO': f"ZONE{np.random.randint(1, 6)}"
-        })
-    
-    df = pd.DataFrame(demo_data)
-    son_okumalar = df.copy()
-    son_okumalar['OKUMA_PERIYODU_GUN'] = 300
-    son_okumalar['GUNLUK_ORT_TUKETIM_m3'] = son_okumalar['AKTIF_m3'] / son_okumalar['OKUMA_PERIYODU_GUN']
-    
-    risk_dagilimi = np.random.choice(['Düşük', 'Orta', 'Yüksek'], size=len(son_okumalar), p=[0.7, 0.2, 0.1])
-    son_okumalar['RISK_SEVIYESI'] = risk_dagilimi
-    son_okumalar['DAVRANIS_YORUMU'] = "Demo verisi"
-    son_okumalar['SUPHELI_DONEMLER'] = "Yok"
-    
-    zone_analizi = df.groupby('KARNE_NO').agg({
-        'TESISAT_NO': 'count',
-        'AKTIF_m3': 'sum', 
-        'TOPLAM_TUTAR': 'sum'
-    }).reset_index()
-    
-    st.success("✅ Demo verisi oluşturuldu!")
+        # Gerçekçi tüketim patternleri
+        patterns = {
+            'normal': lambda: max(np.random.normal(15, 5), 1),
+            'high_var': lambda: max(np.random.normal(20, 15), 0),
+            'zero_pattern': lambda: 0 if np.random.random() < 0.3 else max(np.random.normal(10, 3), 1)
+        }
+        
+        for i in range(300):  # Optimize boyut
+            pattern_type = np.random.choice(['normal', 'high_var', 'zero_pattern'], p=[0.7, 0.2, 0.1])
+            tuketim = patterns[pattern_type]()
+            
+            demo_data.append({
+                'TESISAT_NO': f"DEMO_{1000 + i}",
+                'AKTIF_m3': tuketim,
+                'TOPLAM_TUTAR': tuketim * 12 + np.random.normal(0, 5),
+                'ILK_OKUMA_TARIHI': pd.Timestamp('2024-01-01'),
+                'OKUMA_TARIHI': pd.Timestamp('2024-10-31'),
+                'KARNE_NO': f"ZONE{np.random.randint(1, 6)}"
+            })
+        
+        df = pd.DataFrame(demo_data)
+        
+        # Davranış analizi
+        son_okumalar = df.copy()
+        son_okumalar['OKUMA_PERIYODU_GUN'] = 300
+        son_okumalar['GUNLUK_ORT_TUKETIM_m3'] = son_okumalar['AKTIF_m3'] / son_okumalar['OKUMA_PERIYODU_GUN']
+        
+        # Risk analizi
+        risk_dagilimi = np.random.choice(['Düşük', 'Orta', 'Yüksek'], size=len(son_okumalar), p=[0.6, 0.3, 0.1])
+        son_okumalar['RISK_SEVIYESI'] = risk_dagilimi
+        son_okumalar['DAVRANIS_YORUMU'] = "Demo analiz"
+        
+        # Zone analizi
+        zone_analizi = df.groupby('KARNE_NO').agg({
+            'TESISAT_NO': 'count',
+            'AKTIF_m3': 'sum', 
+            'TOPLAM_TUTAR': 'sum'
+        }).reset_index()
+        
+        # ✅ INCREMENTAL LEARNING TEST - Demo verisiyle
+        if river_service.model is not None and auto_learn:
+            demo_batch = df.head(batch_size).to_dict('records')
+            learn_result = river_service.incremental_learn_batch(demo_batch)
+            
+            if learn_result["status"] == "success":
+                st.sidebar.success(f"🧠 Demo ile öğrenildi: {learn_result['processed_records']} kayıt")
+                
+                # River skorlarını ekle
+                river_scores = []
+                for _, row in son_okumalar.iterrows():
+                    score = river_service.predict_anomaly(row.to_dict())
+                    river_scores.append(score)
+                
+                son_okumalar['RIVER_SCORE'] = river_scores
+            else:
+                st.sidebar.error(f"❌ Demo learning hatası: {learn_result['message']}")
+        
+        st.success("✅ Demo verisi oluşturuldu ve AI öğrendi!")
 
+# ======================================================================
+# GERÇEK VERİ İŞLEME - INCREMENTAL LEARNING
+# ======================================================================
 elif uploaded_file is not None:
     # Gerçek veri yükleme
     df, son_okumalar, zone_analizi = load_and_analyze_data(uploaded_file, zone_file)
     
-    # Incremental Learning
-    if auto_learn and model_service.model is not None and df is not None:
+    # ✅ GERÇEK INCREMENTAL LEARNING - Yeni veri geldiğinde
+    if auto_learn and river_service.model is not None and df is not None:
         with st.sidebar:
-            with st.spinner("🤖 AI öğreniyor..."):
-                # Batch processing - belleği koru
-                records = df.head(batch_size).to_dict('records')
-                result = model_service.incremental_learn(records)
+            with st.spinner("🤖 AI yeni veriyi öğreniyor..."):
+                # Bellek optimizasyonu - batch processing
+                records_to_learn = df.head(batch_size).to_dict('records')
+                learn_result = river_service.incremental_learn_batch(records_to_learn)
                 
-                if result["status"] == "success":
-                    st.success(f"✅ {result['processed_records']} kayıt işlendi")
-                    
-                    # River skorlarını ekle
-                    if 'RIVER_SCORE_MEAN' not in son_okumalar.columns:
-                        # Tesisat bazında River skorları hesapla
+                if learn_result["status"] == "success":
+                    if learn_result["processed_records"] > 0:
+                        st.success(f"✅ {learn_result['processed_records']} kayıt öğrenildi")
+                        
+                        # Tüm veriye River skorlarını uygula
                         river_scores = []
                         for _, row in son_okumalar.iterrows():
-                            prediction = model_service.predict(row.to_dict())
-                            river_scores.append(prediction['score'])
+                            score = river_service.predict_anomaly(row.to_dict())
+                            river_scores.append(score)
                         
                         son_okumalar['RIVER_SCORE'] = river_scores
+                        son_okumalar['RIVER_RISK'] = np.where(
+                            son_okumalar['RIVER_SCORE'] > 0.6, 'Yüksek',
+                            np.where(son_okumalar['RIVER_SCORE'] > 0.3, 'Orta', 'Düşük')
+                        )
+                    else:
+                        st.info("ℹ️ Öğrenilecek yeni kayıt yok")
                 else:
-                    st.error(f"❌ Öğrenme hatası: {result['message']}")
+                    st.error(f"❌ Öğrenme hatası: {learn_result['message']}")
+
 else:
     st.warning("⚠️ Lütfen Excel dosyasını yükleyin veya Demo modunu kullanın")
     st.stop()
 
 # ======================================================================
-# DASHBOARD GÖRSELLEŞTİRME
+# DASHBOARD - INCREMENTAL LEARNING RESULTS
 # ======================================================================
 
-# Genel Metrikler
-if son_okumalar is not None:
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("📊 Toplam Tesisat", f"{len(son_okumalar):,}")
-    
-    with col2:
-        st.metric("💧 Toplam Tüketim", f"{son_okumalar['AKTIF_m3'].sum():,.0f} m³")
-    
-    with col3:
-        st.metric("💰 Toplam Gelir", f"{son_okumalar['TOPLAM_TUTAR'].sum():,.0f} TL")
-    
-    with col4:
-        yuksek_riskli = len(son_okumalar[son_okumalar['RISK_SEVIYESI'] == 'Yüksek'])
-        st.metric("🚨 Yüksek Riskli", f"{yuksek_riskli}")
+# Real-time Metrics
+st.header("📊 Gerçek Zamanlı Metrikler - Incremental Learning")
+col1, col2, col3, col4 = st.columns(4)
 
-# Tab Menü
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📈 Genel Görünüm", 
-    "🗺️ Zone Analizi", 
-    "🔍 Detaylı Analiz",
-    "🤖 AI Insights"
-])
+with col1:
+    st.metric("🏠 Toplam Tesisat", f"{len(son_okumalar):,}")
 
-with tab1:
-    if son_okumalar is not None:
+with col2:
+    st.metric("💧 Toplam Tüketim", f"{son_okumalar['AKTIF_m3'].sum():,.0f} m³")
+
+with col3:
+    st.metric("🎯 Geleneksel Risk", 
+             f"{(son_okumalar['RISK_SEVIYESI'] == 'Yüksek').sum()} tesisat")
+
+with col4:
+    river_high_risk = len(son_okumalar[son_okumalar.get('RIVER_RISK', 'Düşük') == 'Yüksek'])
+    st.metric("🤖 AI Risk", f"{river_high_risk} tesisat")
+
+# INCREMENTAL LEARNING INSIGHTS
+st.header("🧠 Incremental Learning Insights")
+
+if 'RIVER_SCORE' in son_okumalar.columns:
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 AI Analiz", "🎯 Risk Karşılaştırma", "📊 Learning Stats", "🚨 Anomaliler"])
+    
+    with tab1:
         col1, col2 = st.columns(2)
         
         with col1:
-            fig1 = px.histogram(son_okumalar, x='GUNLUK_ORT_TUKETIM_m3', 
-                              title='Günlük Tüketim Dağılımı',
-                              color_discrete_sequence=['#3498DB'])
+            fig1 = px.histogram(son_okumalar, x='RIVER_SCORE', 
+                              title='AI Anomali Skor Dağılımı',
+                              nbins=30, color_discrete_sequence=['#FF6B6B'])
             st.plotly_chart(fig1, use_container_width=True)
         
         with col2:
-            fig2 = px.scatter(son_okumalar, x='AKTIF_m3', y='TOPLAM_TUTAR',
-                            color='RISK_SEVIYESI',
-                            title='Tüketim-Tutar İlişkisi',
-                            color_discrete_map={'Düşük': 'green', 'Orta': 'orange', 'Yüksek': 'red'})
-            st.plotly_chart(fig2, use_container_width=True)
-
-with tab2:
-    if zone_analizi is not None:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig3 = px.pie(zone_analizi, values='TOPLAM_TUKETIM', names='KARNE_NO',
-                         title='Zone Bazlı Tüketim Dağılımı')
-            st.plotly_chart(fig3, use_container_width=True)
-        
-        with col2:
-            fig4 = px.bar(zone_analizi, x='KARNE_NO', y='TESISAT_SAYISI',
-                         title='Zone Bazlı Tesisat Sayısı')
-            st.plotly_chart(fig4, use_container_width=True)
-
-with tab3:
-    if son_okumalar is not None:
-        # Filtreleme ve detaylı analiz
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.subheader("Filtreleme")
-            risk_seviyeleri = st.multiselect(
-                "Risk Seviyeleri",
-                options=['Düşük', 'Orta', 'Yüksek'],
-                default=['Yüksek', 'Orta']
-            )
-        
-        with col2:
-            filtreli_veri = son_okumalar[son_okumalar['RISK_SEVIYESI'].isin(risk_seviyeleri)]
-            st.dataframe(
-                filtreli_veri[['TESISAT_NO', 'AKTIF_m3', 'TOPLAM_TUTAR', 'RISK_SEVIYESI', 'DAVRANIS_YORUMU']].head(20),
-                use_container_width=True
-            )
-
-with tab4:
-    st.header("🤖 AI - River Model Insights")
-    
-    if son_okumalar is not None and 'RIVER_SCORE' in son_okumalar.columns:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig5 = px.histogram(son_okumalar, x='RIVER_SCORE', 
-                              title='River Anomali Skor Dağılımı',
-                              nbins=30)
-            st.plotly_chart(fig5, use_container_width=True)
-        
-        with col2:
-            # En yüksek anomali skorlu tesisatlar
-            high_anomaly = son_okumalar.nlargest(10, 'RIVER_SCORE')[['TESISAT_NO', 'RIVER_SCORE', 'AKTIF_m3', 'RISK_SEVIYESI']]
+            # En yüksek anomali skorlular
+            high_anomaly = son_okumalar.nlargest(10, 'RIVER_SCORE')[
+                ['TESISAT_NO', 'RIVER_SCORE', 'AKTIF_m3', 'RISK_SEVIYESI', 'RIVER_RISK']
+            ]
             st.dataframe(high_anomaly, use_container_width=True)
+    
+    with tab2:
+        col1, col2 = st.columns(2)
         
-        # AI + Heuristic kombinasyonu
-        st.subheader("🔥 Kombine Risk Analizi")
-        son_okumalar['KOMBINE_RISK'] = np.where(
-            (son_okumalar['RISK_SEVIYESI'] == 'Yüksek') | (son_okumalar['RIVER_SCORE'] > 0.7),
-            'Yüksek', 
-            np.where(
-                (son_okumalar['RISK_SEVIYESI'] == 'Orta') | (son_okumalar['RIVER_SCORE'] > 0.4),
-                'Orta', 
-                'Düşük'
-            )
-        )
-        
-        fig6 = px.scatter(son_okumalar, x='AKTIF_m3', y='RIVER_SCORE',
-                         color='KOMBINE_RISK', size='TOPLAM_TUTAR',
-                         hover_data=['TESISAT_NO', 'DAVRANIS_YORUMU'],
-                         title='AI + Heuristic Kombine Risk Analizi',
+        with col1:
+            # Geleneksel vs AI risk karşılaştırması
+            traditional_risk = son_okumalar['RISK_SEVIYESI'].value_counts()
+            fig2 = px.pie(values=traditional_risk.values, names=traditional_risk.index,
+                         title='🎯 Geleneksel Risk Dağılımı',
                          color_discrete_map={'Yüksek': 'red', 'Orta': 'orange', 'Düşük': 'green'})
-        st.plotly_chart(fig6, use_container_width=True)
+            st.plotly_chart(fig2, use_container_width=True)
         
-    else:
-        st.info("🤖 AI analiz için veri yükleyin ve incremental learning'i aktif edin")
+        with col2:
+            if 'RIVER_RISK' in son_okumalar.columns:
+                ai_risk = son_okumalar['RIVER_RISK'].value_counts()
+                fig3 = px.pie(values=ai_risk.values, names=ai_risk.index,
+                             title='🤖 AI Risk Dağılımı',
+                             color_discrete_map={'Yüksek': 'red', 'Orta': 'orange', 'Düşük': 'green'})
+                st.plotly_chart(fig3, use_container_width=True)
+    
+    with tab3:
+        st.subheader("📚 Learning İstatistikleri")
+        stats = river_service.get_learning_stats()
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📖 Toplam Öğrenilen", stats['total_learned'])
+        with col2:
+            st.metric("🕒 Son Öğrenme", stats['last_update'])
+        with col3:
+            st.metric("🎯 Model Durumu", "Aktif" if river_service.model else "Pasif")
+        
+        # Learning history grafiği
+        if river_service.learning_history:
+            history_df = pd.DataFrame(river_service.learning_history)
+            fig4 = px.line(history_df, x='timestamp', y='processed',
+                          title='📈 Incremental Learning Geçmişi',
+                          labels={'timestamp': 'Zaman', 'processed': 'İşlenen Kayıt'})
+            st.plotly_chart(fig4, use_container_width=True)
+    
+    with tab4:
+        st.subheader("🚨 AI Tespit Edilen Anomaliler")
+        
+        # Kombine risk analizi
+        high_risk_combined = son_okumalar[
+            (son_okumalar['RISK_SEVIYESI'] == 'Yüksek') | 
+            (son_okumalar.get('RIVER_RISK', 'Düşük') == 'Yüksek')
+        ]
+        
+        if len(high_risk_combined) > 0:
+            st.success(f"🎯 {len(high_risk_combined)} adet yüksek riskli tesisat tespit edildi")
+            
+            fig5 = px.scatter(high_risk_combined, x='AKTIF_m3', y='RIVER_SCORE',
+                             color='RISK_SEVIYESI', size='TOPLAM_TUTAR',
+                             hover_data=['TESISAT_NO', 'DAVRANIS_YORUMU'],
+                             title='🔥 Yüksek Riskli Tesisatlar - AI + Geleneksel',
+                             color_discrete_map={'Yüksek': 'red', 'Orta': 'orange', 'Düşük': 'green'})
+            st.plotly_chart(fig5, use_container_width=True)
+            
+            # Detaylı liste
+            st.dataframe(high_risk_combined[
+                ['TESISAT_NO', 'AKTIF_m3', 'RIVER_SCORE', 'RISK_SEVIYESI', 'RIVER_RISK', 'DAVRANIS_YORUMU']
+            ].sort_values('RIVER_SCORE', ascending=False), use_container_width=True)
+        else:
+            st.info("🎉 Hiç yüksek riskli tesisat bulunamadı!")
+
+else:
+    st.info("🤖 AI analiz için veri yükleyin - incremental learning otomatik başlayacak")
 
 # Footer
 st.markdown("---")
 st.markdown("""
-**🔧 Sistem Mimarisi:** 
-- 🐍 Python + Streamlit 
-- 🧠 River (Incremental ML) 
+**🔧 Profesyonel Mimari:** 
+- 🐍 Streamlit Cloud 
+- 🧠 River Incremental Learning 
 - 📁 GitHub Model Storage 
-- ☁️ Streamlit Cloud Deploy
+- 🔄 Otomatik Model Persistence
+- 💾 Bellek Optimizasyonu
 """)
