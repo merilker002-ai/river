@@ -13,6 +13,15 @@ class SuTuketimAnalizModeli:
         df['ILK_OKUMA_TARIHI'] = pd.to_datetime(df['ILK_OKUMA_TARIHI'], errors='coerce')
         df['OKUMA_TARIHI'] = pd.to_datetime(df['OKUMA_TARIHI'], errors='coerce')
         
+        # Sayısal sütunları temizle
+        numeric_columns = ['AKTIF_m3', 'TOPLAM_TUTAR']
+        for col in numeric_columns:
+            if col in df.columns:
+                # String değerleri temizle ve sayısal yap
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                # NaN değerleri 0 yap
+                df[col] = df[col].fillna(0)
+        
         # Temel özellik mühendisliği
         df['OKUMA_PERIYODU_GUN'] = (df['OKUMA_TARIHI'] - df['ILK_OKUMA_TARIHI']).dt.days
         df['OKUMA_PERIYODU_GUN'] = df['OKUMA_PERIYODU_GUN'].clip(lower=1, upper=365)
