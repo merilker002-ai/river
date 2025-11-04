@@ -26,6 +26,11 @@ class AdaptiveSuTuketimModeli:
         self.pattern_memory = {}
         self.performance_history = []
         
+        # 1M+ SATIR İÇİN BELLEK OPTİMİZASYONU
+        self.max_pattern_memory = 5000
+        self.max_performance_history = 10000
+        self.learning_batch_size = 500
+        
         # OTOMATİK ÖĞRENME VERİSİ
         self._initialize_with_synthetic_data()
         self.load_model()
@@ -79,6 +84,10 @@ class AdaptiveSuTuketimModeli:
                     if item.get('tesisat_no') not in existing_ids:
                         self.performance_history.append(item)
                 
+                # BELLEK OPTİMİZASYONU - fazla veriyi kes
+                if len(self.performance_history) > self.max_performance_history:
+                    self.performance_history = self.performance_history[-self.max_performance_history:]
+                
                 print(f"✅ Öğrenilmiş model yüklendi. Toplam gözlem: {len(self.performance_history)}")
                 
                 # Threshold'ları optimize et
@@ -93,9 +102,9 @@ class AdaptiveSuTuketimModeli:
             model_data = {
                 'adaptive_thresholds': self.adaptive_thresholds,
                 'pattern_memory': self.pattern_memory,
-                'performance_history': self.performance_history[-2000:],  # Bellek optimizasyonu
+                'performance_history': self.performance_history[-self.max_performance_history:],  # Bellek optimizasyonu
                 'last_update': datetime.now(),
-                'version': '1.1',
+                'version': '2.0-large-scale',
                 'total_observations': len(self.performance_history)
             }
             joblib.dump(model_data, self.model_path)
@@ -104,7 +113,7 @@ class AdaptiveSuTuketimModeli:
             print(f"❌ Model kaydedilemedi: {e}")
     
     def learn_from_feedback(self, tesisat_no, gercek_durum, tahmin_durum, pattern_data=None):
-        """Gelişmiş geri bildirimle öğrenme"""
+        """Gelişmiş geri bildirimle öğrenme - BELLEK ODAKLI"""
         feedback = {
             'tesisat_no': tesisat_no,
             'gercek_durum': gercek_durum,
@@ -114,16 +123,23 @@ class AdaptiveSuTuketimModeli:
             'pattern': pattern_data
         }
         
+        # BELLEK KONTROLÜ
+        if len(self.performance_history) >= self.max_performance_history:
+            # En eski %10 feedback'i sil
+            delete_count = int(self.max_performance_history * 0.1)
+            self.performance_history = self.performance_history[delete_count:]
+        
         # Benzersiz feedback'leri ekle
         existing_ids = [p.get('tesisat_no') for p in self.performance_history]
         if tesisat_no not in existing_ids:
             self.performance_history.append(feedback)
         
-        # Performansı hemen güncelle
-        self.adaptive_learning()
-        self.save_model()
+        # TOPLU ÖĞRENME - Her 500 feedback'te bir
+        if len(self.performance_history) % self.learning_batch_size == 0:
+            self.adaptive_learning()
+            self.save_model()
         
-        print(f"📝 Yeni feedback: {tesisat_no} | Gerçek: {gercek_durum} | Tahmin: {tahmin_durum} | Başarı: {feedback['basari']}")
+        print(f"📝 Yeni feedback: {tesisat_no} | Gerçek: {gercek_durum} | Tahmin: {tahmin_durum}")
     
     def adaptive_learning(self):
         """Daha agresif adaptif öğrenme"""
@@ -160,29 +176,69 @@ class AdaptiveSuTuketimModeli:
         print(f"📊 Yeni Threshold'lar: {self.adaptive_thresholds}")
     
     def auto_learn_from_analysis(self, tesisat_verisi, analiz_sonucu):
-        """Analiz sonuçlarından otomatik öğrenme"""
+        """Analiz sonuçlarından otomatik öğrenme - BELLEK ODAKLI"""
         if len(tesisat_verisi) < 6:  # Yeterli veri yoksa öğrenme
             return
         
         tuketimler = tesisat_verisi['AKTIF_m3'].values
         
-        # Pattern verilerini topla
-        pattern_data = {
-            'sifir_sayisi': sum(tuketimler == 0),
-            'varyasyon': np.std(tuketimler) / np.mean(tuketimler) if np.mean(tuketimler) > 0 else 0,
-            'trend': self._calculate_trend(tuketimler),
-            'tuketim': np.mean(tuketimler),
-            'length': len(tuketimler)
+        # ÖZET pattern oluştur (detaylı veri yerine özet)
+        pattern_summary = {
+            'sifir_sayisi': int(sum(tuketimler == 0)),
+            'varyasyon': float(np.std(tuketimler) / np.mean(tuketimler)) if np.mean(tuketimler) > 0 else 0.0,
+            'trend': float(self._calculate_trend(tuketimler)),
+            'mean_tuketim': float(np.mean(tuketimler)),
+            'max_tuketim': float(np.max(tuketimler)),
+            'min_tuketim': float(np.min(tuketimler)),
+            'okuma_sayisi': len(tuketimler)
         }
         
-        # Pattern'i hafızaya kaydet
-        pattern_key = f"pattern_{hash(str(pattern_data))}"
-        self.pattern_memory[pattern_key] = {
-            'pattern': pattern_data,
-            'risk_seviyesi': analiz_sonucu['risk_seviyesi'],
-            'count': self.pattern_memory.get(pattern_key, {}).get('count', 0) + 1,
-            'last_seen': datetime.now()
-        }
+        # Pattern hash (daha az bellek)
+        pattern_key = f"p_{hash(str(pattern_summary)) % 1000000}"
+        
+        # BELLEK KONTROLÜ - ESKİ PATTERN'LERİ TEMİZLE
+        self._clean_old_patterns()
+        
+        # Pattern'i hafızaya kaydet (sınırlı)
+        if len(self.pattern_memory) < self.max_pattern_memory:
+            self.pattern_memory[pattern_key] = {
+                'summary': pattern_summary,  # Detaylı veri yerine özet
+                'risk_seviyesi': analiz_sonucu['risk_seviyesi'],
+                'count': self.pattern_memory.get(pattern_key, {}).get('count', 0) + 1,
+                'last_seen': datetime.now().timestamp()  # DateTime yerine timestamp
+            }
+        else:
+            # En az kullanılan pattern'i sil
+            self._remove_least_used_pattern()
+            # Yeni pattern'i ekle
+            self.pattern_memory[pattern_key] = {
+                'summary': pattern_summary,
+                'risk_seviyesi': analiz_sonucu['risk_seviyesi'],
+                'count': 1,
+                'last_seen': datetime.now().timestamp()
+            }
+    
+    def _clean_old_patterns(self):
+        """Eski ve kullanılmayan pattern'leri temizle"""
+        if len(self.pattern_memory) > self.max_pattern_memory * 0.8:
+            # 6 aydan eski pattern'leri sil
+            cutoff_timestamp = (datetime.now() - timedelta(days=180)).timestamp()
+            old_patterns = [
+                key for key, pattern in self.pattern_memory.items()
+                if pattern['last_seen'] < cutoff_timestamp
+            ]
+            for key in old_patterns:
+                del self.pattern_memory[key]
+            print(f"🧹 {len(old_patterns)} eski pattern temizlendi")
+    
+    def _remove_least_used_pattern(self):
+        """En az kullanılan pattern'i sil"""
+        if not self.pattern_memory:
+            return
+        
+        min_count_pattern = min(self.pattern_memory.items(), key=lambda x: x[1]['count'])
+        del self.pattern_memory[min_count_pattern[0]]
+        print("🧹 En az kullanılan pattern silindi")
     
     def _calculate_trend(self, tuketimler):
         """Trend hesaplama"""
@@ -275,10 +331,7 @@ class AdaptiveSuTuketimModeli:
         elif abs(trend_degeri) > trend_esik * 0.7:
             risk_puan += 1
         
-        # 4. Son dönem sıfır tüketim (basit kontrol)
-        # Bu kısım tesisat_verisi gerektirdiği için ana fonksiyonda yapılıyor
-        
-        # 5. Anormal yüksek tüketim - adaptive threshold
+        # 4. Anormal yüksek tüketim - adaptive threshold
         yuksek_tuketim_esik = self.adaptive_thresholds['yuksek_tuketim_esik']
         if mean_tuketim > yuksek_tuketim_esik:
             risk_puan += 2
@@ -363,7 +416,7 @@ class AdaptiveSuTuketimModeli:
                 'toplam_gozlem': 0,
                 'basari_orani': 0,
                 'adaptive_thresholds': self.adaptive_thresholds,
-                'model_version': '1.1',
+                'model_version': '2.0-large-scale',
                 'status': 'Sentetik veri ile başlatıldı'
             }
         
@@ -382,7 +435,7 @@ class AdaptiveSuTuketimModeli:
             'basari_orani': total_basari_orani,
             'gercek_basari_orani': real_basari_orani,
             'adaptive_thresholds': self.adaptive_thresholds,
-            'model_version': '1.1',
+            'model_version': '2.0-large-scale',
             'status': 'Aktif öğrenme modunda',
             'pattern_memory_size': len(self.pattern_memory)
         }
