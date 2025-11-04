@@ -18,12 +18,12 @@ except ImportError:
     st.stop()
 
 # ======================================================================
-# 🧠 ADAPTIVE STREAMLIT UYGULAMASI
+# 🧠 HEMEN ÖĞRENEN ADAPTIVE STREAMLIT UYGULAMASI
 # ======================================================================
 
 st.set_page_config(
-    page_title="Adaptive Su Tüketim AI Dashboard",
-    page_icon="🧠",
+    page_title="Hemen Öğrenen Su Tüketim AI",
+    page_icon="🚀",
     layout="wide"
 )
 
@@ -31,11 +31,10 @@ st.set_page_config(
 # 📊 AKILLI VERİ İŞLEME FONKSİYONLARI
 # ======================================================================
 
-@st.cache_data(ttl=3600)  # 1 saat cache
+@st.cache_data(ttl=3600)
 def load_and_analyze_data_adaptive(uploaded_file, zone_file):
     """Adaptive analiz ile veri işleme"""
     try:
-        # Ana veri dosyasını oku - tesisat no'yu string olarak oku
         df = pd.read_excel(uploaded_file, dtype={'TESISAT_NO': str})
         st.success(f"✅ Ana veri başarıyla yüklendi: {len(df)} kayıt")
     except Exception as e:
@@ -50,17 +49,15 @@ def load_and_analyze_data_adaptive(uploaded_file, zone_file):
         tesisat_str = re.sub(r'[,"\']', '', tesisat_str)
         return tesisat_str.strip()
 
-    # Tesisat numaralarını temizle
     df['TESISAT_NO'] = df['TESISAT_NO'].apply(clean_tesisat_no)
     df = df[df['TESISAT_NO'].notnull()]
     df = df[df['TESISAT_NO'] != '']
     df = df[df['TESISAT_NO'] != 'nan']
     
-    # Tarih formatını düzelt
+    # Tarih ve sayısal sütunları temizle
     df['ILK_OKUMA_TARIHI'] = pd.to_datetime(df['ILK_OKUMA_TARIHI'], errors='coerce')
     df['OKUMA_TARIHI'] = pd.to_datetime(df['OKUMA_TARIHI'], errors='coerce')
     
-    # Sayısal sütunları temizle
     numeric_columns = ['AKTIF_m3', 'TOPLAM_TUTAR']
     for col in numeric_columns:
         if col in df.columns:
@@ -101,7 +98,7 @@ def load_and_analyze_data_adaptive(uploaded_file, zone_file):
 
     # ADAPTIVE analiz yap
     if len(son_okumalar) > 0:
-        st.info("🧠 Adaptive AI analizi yapılıyor...")
+        st.info("🧠 Adaptive AI analizi yapılıyor ve ÖĞRENİYOR...")
         progress_bar = st.progress(0)
         davranis_sonuclari = []
         
@@ -109,7 +106,7 @@ def load_and_analyze_data_adaptive(uploaded_file, zone_file):
         for i, (idx, row) in enumerate(son_okumalar.iterrows()):
             tesisat_verisi = df[df['TESISAT_NO'] == row['TESISAT_NO']].sort_values('OKUMA_TARIHI')
             
-            # Adaptive analiz
+            # Adaptive analiz - ÖĞRENME ENTEGRE
             analiz_sonucu = adaptive_model.gelismis_davranis_analizi(tesisat_verisi)
             
             davranis_sonuclari.append({
@@ -117,7 +114,8 @@ def load_and_analyze_data_adaptive(uploaded_file, zone_file):
                 'DAVRANIS_YORUMU': analiz_sonucu['yorum'],
                 'SUPHELI_DONEMLER': analiz_sonucu['supheli_donemler'],
                 'RISK_SEVIYESI': analiz_sonucu['risk_seviyesi'],
-                'RISK_PUANI': analiz_sonucu['risk_puan']
+                'RISK_PUANI': analiz_sonucu['risk_puan'],
+                'PATTERN_DATA': analiz_sonucu.get('pattern_data', {})
             })
             
             if i % 100 == 0 and total_tesisat > 0:
@@ -166,36 +164,65 @@ def load_and_analyze_data_adaptive(uploaded_file, zone_file):
     return df, son_okumalar, zone_analizi, kullanici_zone_verileri
 
 # ======================================================================
-# 🎨 ADAPTIVE STREAMLIT ARAYÜZ
+# 🎨 HEMEN ÖĞRENEN STREAMLIT ARAYÜZ
 # ======================================================================
 
-st.title("🧠 Adaptive Su Tüketim AI Dashboard")
-st.markdown("**Kendi Kendine Öğrenen Yapay Zeka Sistemi**")
+st.title("🚀 Hemen Öğrenen Su Tüketim AI Dashboard")
+st.markdown("**Sentetik Veri ile Eğitilmiş & Aktif Öğrenen Yapay Zeka**")
 
-# Sidebar - Öğrenme Kontrolleri
+# Sidebar - Gelişmiş Öğrenme Kontrolleri
 st.sidebar.header("🧠 AI Öğrenme Kontrolleri")
 
-# Öğrenme istatistikleri
+# Öğrenme istatistikleri - GÜNCELLENMİŞ
 learning_stats = adaptive_model.get_learning_stats()
 st.sidebar.metric("🤖 Toplam Gözlem", f"{learning_stats['toplam_gozlem']:,}")
-st.sidebar.metric("🎯 Başarı Oranı", f"{learning_stats['basari_orani']:.1%}")
+st.sidebar.metric("🎯 Gerçek Gözlem", f"{learning_stats['gercek_gozlem']:,}")
+st.sidebar.metric("📊 Başarı Oranı", f"{learning_stats['basari_orani']:.1%}")
 
-# Adaptive threshold'ları göster
-st.sidebar.subheader("Adaptive Threshold'lar")
-for key, value in learning_stats['adaptive_thresholds'].items():
-    st.sidebar.write(f"**{key}**: {value:.2f}")
+# Hızlı geri bildirim sistemi
+st.sidebar.subheader("⚡ Hızlı Geri Bildirim")
 
-# Geri bildirim sistemi
-st.sidebar.subheader("🤖 AI Geri Bildirim")
-feedback_tesisat = st.sidebar.text_input("Tesisat No")
-feedback_gercek = st.sidebar.selectbox("Gerçek Durum", ["Yüksek", "Orta", "Düşük"])
-feedback_tahmin = st.sidebar.selectbox("Tahmin Durum", ["Yüksek", "Orta", "Düşük"])
+# Otomatik geri bildirim butonları
+col1, col2, col3 = st.sidebar.columns(3)
+with col1:
+    if st.button("👍 Doğru Tahmin"):
+        adaptive_model.learn_from_feedback(
+            "AUTO_POSITIVE", "Yüksek", "Yüksek", 
+            {"type": "positive_feedback", "source": "auto"}
+        )
+        st.sidebar.success("✅ Olumlu feedback eklendi!")
+        
+with col2:
+    if st.button("👎 Yanlış Tahmin"):
+        adaptive_model.learn_from_feedback(
+            "AUTO_NEGATIVE", "Düşük", "Yüksek", 
+            {"type": "negative_feedback", "source": "auto"}
+        )
+        st.sidebar.warning("⚠️ Düzeltme feedback'i eklendi!")
 
-if st.sidebar.button("📝 Geri Bildirim Gönder"):
+with col3:
+    if st.button("🔄 Modeli Yenile"):
+        st.rerun()
+
+# Manuel geri bildirim
+st.sidebar.subheader("📝 Manuel Geri Bildirim")
+feedback_tesisat = st.sidebar.text_input("Tesisat No", "TEST_001")
+feedback_gercek = st.sidebar.selectbox("Gerçek Durum", ["Yüksek", "Orta", "Düşük"], index=0)
+feedback_tahmin = st.sidebar.selectbox("AI Tahmini", ["Yüksek", "Orta", "Düşük"], index=0)
+
+if st.sidebar.button("📤 Geri Bildirim Gönder"):
     if feedback_tesisat:
-        adaptive_model.learn_from_feedback(feedback_tesisat, feedback_gercek, feedback_tahmin)
+        adaptive_model.learn_from_feedback(
+            feedback_tesisat, feedback_gercek, feedback_tahmin,
+            {"type": "manual_feedback", "timestamp": datetime.now()}
+        )
         st.sidebar.success("✅ Geri bildirim kaydedildi! AI öğreniyor...")
         st.rerun()
+
+# Adaptive threshold'ları göster
+st.sidebar.subheader("🔧 Adaptive Threshold'lar")
+for key, value in learning_stats['adaptive_thresholds'].items():
+    st.sidebar.write(f"**{key}**: `{value:.2f}`")
 
 # Dosya yükleme bölümü
 st.sidebar.header("📁 Dosya Yükleme")
@@ -211,9 +238,9 @@ zone_file = st.sidebar.file_uploader(
     help="Zone bilgilerini içeren Excel dosyasını yükleyin"
 )
 
-# Demo butonu - Adaptive
-if st.sidebar.button("🎮 Adaptive Demo Modu"):
-    st.info("🧠 Adaptive Demo modu aktif! AI öğrenme mekanizması çalışıyor...")
+# Gelişmiş Demo butonu
+if st.sidebar.button("🎮 Gelişmiş Demo Modu"):
+    st.info("🚀 Gelişmiş Demo modu aktif! AI hem analiz ediyor hem de ÖĞRENİYOR...")
     
     # Basit demo verisi oluştur
     np.random.seed(42)
@@ -270,7 +297,7 @@ if st.sidebar.button("🎮 Adaptive Demo Modu"):
     # Son okumaları al
     son_okumalar = df_detayli.sort_values('OKUMA_TARIHI').groupby('TESISAT_NO').last().reset_index()
     
-    # Adaptive analiz
+    # Adaptive analiz - ÖĞRENME ENTEGRE
     davranis_sonuclari = []
     for tesisat_no in son_okumalar['TESISAT_NO'].unique():
         tesisat_verisi = df_detayli[df_detayli['TESISAT_NO'] == tesisat_no].sort_values('OKUMA_TARIHI')
@@ -279,9 +306,10 @@ if st.sidebar.button("🎮 Adaptive Demo Modu"):
         davranis_sonuclari.append({
             'TESISAT_NO': tesisat_no,
             'DAVRANIS_YORUMU': analiz_sonucu['yorum'],
-            'SUPHELI_DONEMLER': analiz_sonucu['supheli_donemler'],
+            'SUPHEli_DONEMLER': analiz_sonucu['supheli_donemler'],
             'RISK_SEVIYESI': analiz_sonucu['risk_seviyesi'],
-            'RISK_PUANI': analiz_sonucu['risk_puan']
+            'RISK_PUANI': analiz_sonucu['risk_puan'],
+            'PATTERN_DATA': analiz_sonucu.get('pattern_data', {})
         })
     
     davranis_df = pd.DataFrame(davranis_sonuclari)
@@ -299,7 +327,7 @@ if st.sidebar.button("🎮 Adaptive Demo Modu"):
         'ZONE2': {'ad': 'BÖLGE-2', 'verilen_su': 8000, 'tahakkuk_m3': 6000, 'kayip_oran': 25.0},
     }
     
-    st.success("✅ Adaptive demo verisi başarıyla oluşturuldu! AI öğrenme aktif.")
+    st.success("✅ Gelişmiş demo verisi oluşturuldu! AI analiz ediyor ve ÖĞRENİYOR.")
 
 elif uploaded_file is not None:
     try:
@@ -310,10 +338,10 @@ elif uploaded_file is not None:
         st.error(f"Veri yüklenirken hata: {e}")
         st.stop()
 else:
-    st.warning("⚠️ Lütfen Excel dosyasını yükleyin veya Adaptive Demo modunu kullanın")
+    st.warning("⚠️ Lütfen Excel dosyasını yükleyin veya Gelişmiş Demo modunu kullanın")
     st.stop()
 
-# Genel Metrikler - Adaptive
+# Genel Metrikler - GÜNCELLENMİŞ
 if son_okumalar is not None and len(son_okumalar) > 0:
     col1, col2, col3, col4, col5 = st.columns(5)
     
@@ -338,7 +366,7 @@ if son_okumalar is not None and len(son_okumalar) > 0:
     with col5:
         st.metric("🧠 AI Gözlem", f"{learning_stats['toplam_gozlem']:,}")
 
-# Tab Menü - Adaptive
+# Tab Menü - GÜNCELLENMİŞ
 tab1, tab2, tab3, tab4 = st.tabs(["📈 Genel Görünüm", "🗺️ Zone Analizi", "🔍 Detaylı Analiz", "🤖 AI Öğrenme"])
 
 with tab1:
@@ -348,7 +376,7 @@ with tab1:
         with col1:
             if 'GUNLUK_ORT_TUKETIM_m3' in son_okumalar.columns:
                 fig1 = px.histogram(son_okumalar, x='GUNLUK_ORT_TUKETIM_m3', 
-                                  title='Adaptive Günlük Tüketim Dağılımı',
+                                  title='Öğrenilmiş Günlük Tüketim Dağılımı',
                                   labels={'GUNLUK_ORT_TUKETIM_m3': 'Günlük Tüketim (m³)'})
                 st.plotly_chart(fig1, use_container_width=True)
         
@@ -356,7 +384,7 @@ with tab1:
             if 'RISK_SEVIYESI' in son_okumalar.columns:
                 risk_dagilim = son_okumalar['RISK_SEVIYESI'].value_counts()
                 fig2 = px.pie(values=risk_dagilim.values, names=risk_dagilim.index,
-                             title='Adaptive Risk Dağılımı')
+                             title='Öğrenilmiş Risk Dağılımı')
                 st.plotly_chart(fig2, use_container_width=True)
 
 with tab2:
@@ -379,7 +407,7 @@ with tab2:
 
 with tab3:
     if son_okumalar is not None and len(son_okumalar) > 0:
-        st.subheader("Adaptive Tesisat Detayları")
+        st.subheader("Öğrenilmiş Tesisat Detayları")
         
         col1, col2 = st.columns(2)
         with col1:
@@ -438,31 +466,80 @@ with tab3:
 with tab4:
     st.header("🤖 Adaptive AI Öğrenme Durumu")
     
-    # Öğrenme istatistikleri
+    # Detaylı öğrenme istatistikleri
     stats = adaptive_model.get_learning_stats()
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Toplam Gözlem", f"{stats['toplam_gozlem']:,}")
     with col2:
-        st.metric("Başarı Oranı", f"{stats['basari_orani']:.1%}")
+        st.metric("Gerçek Gözlem", f"{stats['gercek_gozlem']:,}")
     with col3:
-        st.metric("Model Versiyon", "1.0")
+        st.metric("Başarı Oranı", f"{stats['basari_orani']:.1%}")
+    with col4:
+        st.metric("Model Versiyon", stats['model_version'])
+    
+    # Öğrenme durumu
+    st.subheader("📊 Öğrenme İlerlemesi")
+    
+    progress_col1, progress_col2 = st.columns(2)
+    
+    with progress_col1:
+        # Gözlem ilerlemesi
+        total_obs = stats['toplam_gozlem']
+        max_obs = 1000
+        obs_progress = min(total_obs / max_obs, 1.0)
+        st.progress(obs_progress, text=f"Gözlem İlerlemesi: {total_obs}/{max_obs}")
+    
+    with progress_col2:
+        # Başarı ilerlemesi
+        success_rate = stats['basari_orani']
+        st.progress(success_rate, text=f"Başarı Oranı: {success_rate:.1%}")
     
     # Adaptive threshold grafiği
-    st.subheader("Adaptive Threshold Gelişimi")
-    thresholds_df = pd.DataFrame([stats['adaptive_thresholds']])
-    st.dataframe(thresholds_df.T.rename(columns={0: 'Değer'}), use_container_width=True)
+    st.subheader("🔧 Adaptive Threshold Gelişimi")
     
-    # Öğrenme önerileri
-    st.subheader("🤖 AI Önerileri")
-    if stats['toplam_gozlem'] < 100:
-        st.info("**Öneri**: Daha fazla geri bildirim toplayarak AI'nın öğrenme performansını artırabilirsiniz.")
+    thresholds = stats['adaptive_thresholds']
+    threshold_df = pd.DataFrame({
+        'Threshold': list(thresholds.keys()),
+        'Değer': list(thresholds.values())
+    })
+    
+    fig = px.bar(threshold_df, x='Threshold', y='Değer', 
+                 title='Adaptive Threshold Değerleri',
+                 color='Değer', color_continuous_scale='viridis')
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # AI Önerileri - GELİŞMİŞ
+    st.subheader("🚀 AI Önerileri & Sonraki Adımlar")
+    
+    if stats['toplam_gozlem'] < 50:
+        st.info("""
+        **🎯 Öneri**: AI henüz yeni başladı! 
+        - Demo modda birkaç analiz yapın
+        - Hızlı geri bildirim butonlarını kullanın
+        - 50+ gözlem sonrası daha akıllı hale gelecek
+        """)
     elif stats['basari_orani'] < 0.7:
-        st.warning("**Öneri**: Başarı oranı düşük. Threshold değerlerini manuel olarak ayarlamayı düşünebilirsiniz.")
+        st.warning("""
+        **⚠️ Geliştirme Gerekli**: Başarı oranı düşük!
+        - Daha fazla geri bildirim toplayın
+        - Threshold'ları manuel ayarlamayı düşünün
+        - Farklı pattern'ler için feedback verin
+        """)
     else:
-        st.success("**Öneri**: AI iyi performans gösteriyor! Mevcut ayarları koruyabilirsiniz.")
+        st.success("""
+        **✅ Mükemmel Performans**: AI iyi öğreniyor!
+        - Mevcut ayarları koruyun
+        - Yeni pattern'ler için feedback vermeye devam edin
+        - Modeli düzenli olarak kaydedin
+        """)
+    
+    # Pattern hafızası
+    if stats['pattern_memory_size'] > 0:
+        st.subheader("🧠 Pattern Hafızası")
+        st.info(f"AI {stats['pattern_memory_size']} farklı pattern'i hafızasında tutuyor!")
 
 # Footer
 st.markdown("---")
-st.markdown("🧠 **Adaptive Su Tüketim AI Sistemi** | Kendi Kendine Öğrenen Yapay Zeka")
+st.markdown("🚀 **Hemen Öğrenen Su Tüketim AI Sistemi** | Sentetik Veri + Aktif Öğrenme")
