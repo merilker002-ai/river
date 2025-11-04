@@ -458,17 +458,25 @@ with tab1:
         
         with col1:
             if 'GUNLUK_ORT_TUKETIM_m3' in son_okumalar.columns:
-                fig1 = px.histogram(son_okumalar, x='GUNLUK_ORT_TUKETIM_m3', 
-                                  title='Gerçekçi Günlük Tüketim Dağılımı',
-                                  labels={'GUNLUK_ORT_TUKETIM_m3': 'Günlük Tüketim (m³)'})
-                st.plotly_chart(fig1, use_container_width=True)
+                # Boş veri kontrolü
+                if not son_okumalar['GUNLUK_ORT_TUKETIM_m3'].empty:
+                    fig1 = px.histogram(son_okumalar, x='GUNLUK_ORT_TUKETIM_m3', 
+                                      title='Gerçekçi Günlük Tüketim Dağılımı',
+                                      labels={'GUNLUK_ORT_TUKETIM_m3': 'Günlük Tüketim (m³)'})
+                    st.plotly_chart(fig1, use_container_width=True)
+                else:
+                    st.info("📊 Günlük tüketim verisi henüz mevcut değil")
         
         with col2:
             if 'RISK_SEVIYESI' in son_okumalar.columns:
                 risk_dagilim = son_okumalar['RISK_SEVIYESI'].value_counts()
-                fig2 = px.pie(values=risk_dagilim.values, names=risk_dagilim.index,
-                             title='Öğrenilmiş Risk Dağılımı')
-                st.plotly_chart(fig2, use_container_width=True)
+                # Pie chart için boş veri kontrolü - KRİTİK DÜZELTME
+                if not risk_dagilim.empty and len(risk_dagilim) > 0:
+                    fig2 = px.pie(values=risk_dagilim.values, names=risk_dagilim.index,
+                                 title='Öğrenilmiş Risk Dağılımı')
+                    st.plotly_chart(fig2, use_container_width=True)
+                else:
+                    st.info("🎯 Risk analizi henüz mevcut değil")
 
 with tab2:
     if zone_analizi is not None and len(zone_analizi) > 0:
@@ -649,3 +657,4 @@ with tab4:
 # Footer
 st.markdown("---")
 st.markdown("🚀 **Hemen Öğrenen Su Tüketim AI Sistemi v2.0** | 1M+ Satır Desteği | Optimize Bellek Yönetimi")
+
