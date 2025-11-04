@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-import joblib
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -19,12 +18,6 @@ class SuTuketimAnalizModeli:
         df['OKUMA_PERIYODU_GUN'] = df['OKUMA_PERIYODU_GUN'].clip(lower=1, upper=365)
         df['GUNLUK_ORT_TUKETIM_m3'] = df['AKTIF_m3'] / df['OKUMA_PERIYODU_GUN']
         df['GUNLUK_ORT_TUKETIM_m3'] = df['GUNLUK_ORT_TUKETIM_m3'].clip(lower=0.001, upper=100)
-        
-        # Ek özellikler
-        df['TUKEIM_VARYASYON'] = df.groupby('TESISAT_NO')['AKTIF_m3'].transform('std')
-        df['TUKEIM_ORTALAMA'] = df.groupby('TESISAT_NO')['AKTIF_m3'].transform('mean')
-        df['VARYASYON_KATSAYISI'] = df['TUKEIM_VARYASYON'] / df['TUKEIM_ORTALAMA']
-        df['VARYASYON_KATSAYISI'] = df['VARYASYON_KATSAYISI'].fillna(0)
         
         return df
     
@@ -58,11 +51,9 @@ class SuTuketimAnalizModeli:
         
         # 1. Sıfır tüketim analizi
         if sifir_sayisi >= 2:
-            sifir_indisler = np.where(tuketimler == 0)[0]
-            if len(sifir_indisler) >= 2:
-                ardisik_olmayan = sum(np.diff(sifir_indisler) > 1) >= 1
-                if ardisik_olmayan:
-                    risk_puan += 3
+            risk_puan += 3
+        elif sifir_sayisi == 1:
+            risk_puan += 1
         
         if sifir_orani > 0.5:
             risk_puan += 2
@@ -80,7 +71,7 @@ class SuTuketimAnalizModeli:
             risk_puan += 1
         
         # 4. Son dönem sıfır tüketim
-        if tuketimler[-1] == 0 and len(tuketimler) > 1:
+        if len(tuketimler) > 1 and tuketimler[-1] == 0:
             risk_puan += 2
         
         # 5. Anormal yüksek tüketim
@@ -102,8 +93,11 @@ class SuTuketimAnalizModeli:
         if sifir_sayisi > 0:
             for idx in np.where(tuketimler == 0)[0]:
                 if idx < len(tarihler):
-                    tarih_obj = pd.Timestamp(tarihler.iloc[idx])
-                    supheli_donemler.append(tarih_obj.strftime('%m/%Y'))
+                    try:
+                        tarih_obj = pd.Timestamp(tarihler.iloc[idx])
+                        supheli_donemler.append(tarih_obj.strftime('%m/%Y'))
+                    except:
+                        continue
         
         # Yorum oluşturma
         if risk_seviyesi == "Yüksek":
@@ -128,7 +122,10 @@ class SuTuketimAnalizModeli:
         if np.mean(tuketimler) > 50:
             yorumlar.append("Anormal yüksek tüketim")
         
-        return " | ".join(yorumlar) + " - Acil inceleme önerilir"
+        if yorumlar:
+            return " | ".join(yorumlar) + " - Acil inceleme önerilir"
+        else:
+            return "Yüksek riskli tüketim paterni - İnceleme gerekli"
     
     def _orta_risk_yorumu_olustur(self, tuketimler, sifir_sayisi, varyasyon_katsayisi):
         """Orta risk için yorum oluşturur"""
@@ -149,32 +146,24 @@ class SuTuketimAnalizModeli:
         return np.random.choice(yorumlar)
     
     def anomaly_detection(self, df):
-        """Basit anomali tespiti yapar (scikit-learn olmadan)"""
-        # IQR (Interquartile Range) yöntemi ile anomali tespiti
-        Q1 = df['AKTIF_m3'].quantile(0.25)
-        Q3 = df['AKTIF_m3'].quantile(0.75)
-        IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        
-        # Anomalileri işaretle
-        df['ANOMALY_SCORE'] = np.where(
-            (df['AKTIF_m3'] < lower_bound) | (df['AKTIF_m3'] > upper_bound), -1, 1
-        )
+        """Basit anomali tespiti yapar"""
+        try:
+            # IQR (Interquartile Range) yöntemi ile anomali tespiti
+            Q1 = df['AKTIF_m3'].quantile(0.25)
+            Q3 = df['AKTIF_m3'].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            
+            # Anomalileri işaretle
+            df['ANOMALY_SCORE'] = np.where(
+                (df['AKTIF_m3'] < lower_bound) | (df['AKTIF_m3'] > upper_bound), -1, 1
+            )
+        except:
+            # Hata durumunda tümünü normal olarak işaretle
+            df['ANOMALY_SCORE'] = 1
         
         return df
-    
-    def save_model(self, filepath):
-        """Modeli kaydeder"""
-        model_data = {
-            'model_tarihi': pd.Timestamp.now()
-        }
-        joblib.dump(model_data, filepath)
-    
-    def load_model(self, filepath):
-        """Modeli yükler"""
-        model_data = joblib.load(filepath)
-        self.model_egitildi = True
 
 # Global model instance
 analiz_modeli = SuTuketimAnalizModeli()
