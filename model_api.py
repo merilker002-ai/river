@@ -1,21 +1,11 @@
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import IsolationForest
-from sklearn.cluster import DBSCAN
-from sklearn.preprocessing import StandardScaler
 import joblib
 import warnings
 warnings.filterwarnings('ignore')
 
 class SuTuketimAnalizModeli:
     def __init__(self):
-        self.scaler = StandardScaler()
-        self.isolation_forest = IsolationForest(
-            contamination=0.1, 
-            random_state=42,
-            n_estimators=100
-        )
-        self.dbscan = DBSCAN(eps=0.5, min_samples=10)
         self.model_egitildi = False
     
     def veri_on_isleme(self, df):
@@ -111,8 +101,9 @@ class SuTuketimAnalizModeli:
         supheli_donemler = []
         if sifir_sayisi > 0:
             for idx in np.where(tuketimler == 0)[0]:
-                tarih_obj = pd.Timestamp(tarihler.iloc[idx])
-                supheli_donemler.append(tarih_obj.strftime('%m/%Y'))
+                if idx < len(tarihler):
+                    tarih_obj = pd.Timestamp(tarihler.iloc[idx])
+                    supheli_donemler.append(tarih_obj.strftime('%m/%Y'))
         
         # Yorum oluşturma
         if risk_seviyesi == "Yüksek":
@@ -158,31 +149,31 @@ class SuTuketimAnalizModeli:
         return np.random.choice(yorumlar)
     
     def anomaly_detection(self, df):
-        """Anomali tespiti yapar"""
-        features = df[['AKTIF_m3', 'GUNLUK_ORT_TUKETIM_m3', 'VARYASYON_KATSAYISI']].fillna(0)
+        """Basit anomali tespiti yapar (scikit-learn olmadan)"""
+        # IQR (Interquartile Range) yöntemi ile anomali tespiti
+        Q1 = df['AKTIF_m3'].quantile(0.25)
+        Q3 = df['AKTIF_m3'].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
         
-        # Standardize features
-        features_scaled = self.scaler.fit_transform(features)
-        
-        # Isolation Forest ile anomali tespiti
-        anomalies = self.isolation_forest.fit_predict(features_scaled)
-        df['ANOMALY_SCORE'] = anomalies
+        # Anomalileri işaretle
+        df['ANOMALY_SCORE'] = np.where(
+            (df['AKTIF_m3'] < lower_bound) | (df['AKTIF_m3'] > upper_bound), -1, 1
+        )
         
         return df
     
     def save_model(self, filepath):
         """Modeli kaydeder"""
         model_data = {
-            'scaler': self.scaler,
-            'isolation_forest': self.isolation_forest
+            'model_tarihi': pd.Timestamp.now()
         }
         joblib.dump(model_data, filepath)
     
     def load_model(self, filepath):
         """Modeli yükler"""
         model_data = joblib.load(filepath)
-        self.scaler = model_data['scaler']
-        self.isolation_forest = model_data['isolation_forest']
         self.model_egitildi = True
 
 # Global model instance
