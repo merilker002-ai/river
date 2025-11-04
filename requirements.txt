@@ -1,7 +1,7 @@
-streamlit
-pandas
-plotly
-numpy
-openpyxl
-scikit-learn
-river
+pandas>=1.5.0
+numpy>=1.21.0
+plotly>=5.10.0
+streamlit>=1.22.0
+openpyxl>=3.0.0
+scikit-learn>=1.2.0
+river>=0.21.0
