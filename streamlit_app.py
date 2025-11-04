@@ -12,14 +12,7 @@ import re
 import subprocess
 import sys
 
-# openpyxl kontrolü ve otomatik yükleme
-try:
-    import openpyxl
-except ImportError:
-    st.warning("📦 openpyxl kütüphanesi yükleniyor...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
-    st.success("✅ openpyxl başarıyla yüklendi! Sayfayı yenileyin.")
-    st.stop()
+
 # ======================================================================
 # API CLIENT - AYNI
 # ======================================================================
@@ -435,4 +428,5 @@ st.markdown("""
 **📁 Girdi:** İki Excel dosyası (Ana veri + Zone veri)  
 **🎯 Çıktı:** Entegre risk analizi + AI insights
 """)
+
 
