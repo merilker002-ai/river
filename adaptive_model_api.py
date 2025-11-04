@@ -138,6 +138,9 @@ class AdaptiveSuTuketimModeli:
         if len(self.performance_history) % self.learning_batch_size == 0:
             self.adaptive_learning()
             self.save_model()
+        else:
+            # Küçük güncellemeler için de kaydet
+            self.save_model()
         
         print(f"📝 Yeni feedback: {tesisat_no} | Gerçek: {gercek_durum} | Tahmin: {tahmin_durum}")
     
@@ -414,10 +417,13 @@ class AdaptiveSuTuketimModeli:
         if not self.performance_history:
             return {
                 'toplam_gozlem': 0,
+                'gercek_gozlem': 0,
                 'basari_orani': 0,
+                'gercek_basari_orani': 0,
                 'adaptive_thresholds': self.adaptive_thresholds,
                 'model_version': '2.0-large-scale',
-                'status': 'Sentetik veri ile başlatıldı'
+                'status': 'Sentetik veri ile başlatıldı',
+                'pattern_memory_size': len(self.pattern_memory)
             }
         
         toplam_gozlem = len(self.performance_history)
