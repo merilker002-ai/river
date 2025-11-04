@@ -273,6 +273,7 @@ with col1:
             {"type": "positive_feedback", "source": "auto"}
         )
         st.sidebar.success("✅ Olumlu feedback eklendi!")
+        st.rerun()
         
 with col2:
     if st.button("👎 Yanlış Tahmin"):
@@ -281,6 +282,7 @@ with col2:
             {"type": "negative_feedback", "source": "auto"}
         )
         st.sidebar.warning("⚠️ Düzeltme feedback'i eklendi!")
+        st.rerun()
 
 with col3:
     if st.button("🔄 Modeli Yenile"):
@@ -552,74 +554,97 @@ with tab4:
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Toplam Gözlem", f"{stats['toplam_gozlem']:,}")
+        st.metric("👁️ Toplam Gözlem", f"{stats['toplam_gozlem']:,}")
     with col2:
-        st.metric("Gerçek Gözlem", f"{stats['gercek_gozlem']:,}")
+        st.metric("🎯 Gerçek Gözlem", f"{stats['gercek_gozlem']:,}")
     with col3:
-        st.metric("Başarı Oranı", f"{stats['basari_orani']:.1%}")
+        st.metric("✅ Başarı Oranı", f"{stats['basari_orani']:.1%}")
     with col4:
-        st.metric("Model Versiyon", stats['model_version'])
+        st.metric("🔢 Model Versiyon", stats['model_version'])
     
-    # Öğrenme durumu
+    # Öğrenme durumu - DÜZELTİLMİŞ
     st.subheader("📊 Öğrenme İlerlemesi")
     
     progress_col1, progress_col2 = st.columns(2)
     
     with progress_col1:
-        # Gözlem ilerlemesi
+        # Gözlem ilerlemesi - DÜZELTİLMİŞ
         total_obs = stats['toplam_gozlem']
-        max_obs = 10000  # 1000 → 10000
+        max_obs = 10000
         obs_progress = min(total_obs / max_obs, 1.0)
-        st.progress(obs_progress, text=f"Gözlem İlerlemesi: {total_obs}/{max_obs}")
+        st.progress(obs_progress)
+        st.write(f"**Gözlem İlerlemesi:** {total_obs:,} / {max_obs:,}")
     
     with progress_col2:
-        # Başarı ilerlemesi
+        # Başarı ilerlemesi - DÜZELTİLMİŞ
         success_rate = stats['basari_orani']
-        st.progress(success_rate, text=f"Başarı Oranı: {success_rate:.1%}")
+        st.progress(success_rate)
+        st.write(f"**Başarı Oranı:** {success_rate:.1%}")
     
-    # Adaptive threshold grafiği
-    st.subheader("🔧 Adaptive Threshold Gelişimi")
+    # Adaptive threshold grafiği - BASİTLEŞTİRİLMİŞ
+    st.subheader("🔧 Adaptive Threshold Değerleri")
     
     thresholds = stats['adaptive_thresholds']
-    threshold_df = pd.DataFrame({
-        'Threshold': list(thresholds.keys()),
-        'Değer': list(thresholds.values())
-    })
     
+    # Tablo formatında göster
+    threshold_data = []
+    for key, value in thresholds.items():
+        threshold_data.append({
+            'Threshold': key,
+            'Değer': f"{value:.2f}"
+        })
+    
+    threshold_df = pd.DataFrame(threshold_data)
+    st.dataframe(threshold_df, use_container_width=True, hide_index=True)
+    
+    # Basit grafik
     fig = px.bar(threshold_df, x='Threshold', y='Değer', 
                  title='Adaptive Threshold Değerleri',
-                 color='Değer', color_continuous_scale='viridis')
+                 labels={'Değer': 'Threshold Değeri'})
+    fig.update_traces(texttemplate='%{y:.2f}', textposition='outside')
     st.plotly_chart(fig, use_container_width=True)
     
-    # AI Önerileri - GELİŞMİŞ
+    # AI Önerileri - NETLEŞTİRİLMİŞ
     st.subheader("🚀 AI Önerileri & Sonraki Adımlar")
     
     if stats['toplam_gozlem'] < 50:
         st.info("""
-        **🎯 Öneri**: AI henüz yeni başladı! 
+        **🎯 Öneri:** AI henüz yeni başladı! 
         - Demo modda birkaç analiz yapın
-        - Hızlı geri bildirim butonlarını kullanın
+        - Hızlı geri bildirim butonlarını kullanın  
         - 50+ gözlem sonrası daha akıllı hale gelecek
         """)
     elif stats['basari_orani'] < 0.7:
         st.warning("""
-        **⚠️ Geliştirme Gerekli**: Başarı oranı düşük!
+        **⚠️ Geliştirme Gerekli:** Başarı oranı düşük!
         - Daha fazla geri bildirim toplayın
         - Threshold'ları manuel ayarlamayı düşünün
         - Farklı pattern'ler için feedback verin
         """)
     else:
         st.success("""
-        **✅ Mükemmel Performans**: AI iyi öğreniyor!
+        **✅ Mükemmel Performans:** AI iyi öğreniyor!
         - Mevcut ayarları koruyun
         - Yeni pattern'ler için feedback vermeye devam edin
         - Modeli düzenli olarak kaydedin
         """)
     
-    # Pattern hafızası
+    # Pattern hafızası - NET GÖSTERİM
     if stats['pattern_memory_size'] > 0:
         st.subheader("🧠 Pattern Hafızası")
-        st.info(f"AI {stats['pattern_memory_size']} farklı pattern'i hafızasında tutuyor!")
+        st.info(f"AI **{stats['pattern_memory_size']}** farklı pattern'i hafızasında tutuyor!")
+    
+    # EK: Model durumu
+    st.subheader("🔍 Model Durumu")
+    status_col1, status_col2 = st.columns(2)
+    
+    with status_col1:
+        st.write(f"**Durum:** {stats['status']}")
+        st.write(f"**Son Güncelleme:** {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    
+    with status_col2:
+        st.write(f"**Gerçek Başarı Oranı:** {stats.get('gercek_basari_orani', 0):.1%}")
+        st.write(f"**Pattern Bellek Kullanımı:** {stats['pattern_memory_size']} / 5,000")
 
 # Footer
 st.markdown("---")
