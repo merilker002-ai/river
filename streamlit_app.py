@@ -35,18 +35,39 @@ st.set_page_config(
 def load_and_analyze_data(uploaded_file, zone_file):
     """İki dosyadan veriyi okur ve analiz eder"""
     try:
-        # Ana veri dosyasını oku
-        df = pd.read_excel(uploaded_file)
+        # Ana veri dosyasını oku - tesisat no'yu string olarak oku
+        df = pd.read_excel(uploaded_file, dtype={'TESISAT_NO': str})
         st.success(f"✅ Ana veri başarıyla yüklendi: {len(df)} kayıt")
     except Exception as e:
         st.error(f"❌ Ana dosya okuma hatası: {e}")
         return None, None, None, None
 
-    # Model ile veri ön işleme
-    df = analiz_modeli.veri_on_isleme(df)
+    # Tesisat numarasını temizle
+    def clean_tesisat_no(tesisat_no):
+        if pd.isna(tesisat_no):
+            return None
+        # String'e çevir ve temizle
+        tesisat_str = str(tesisat_no).strip()
+        # Noktalama işaretlerini kaldır
+        tesisat_str = re.sub(r'[,"\']', '', tesisat_str)
+        # Baştaki ve sondaki boşlukları temizle
+        tesisat_str = tesisat_str.strip()
+        return tesisat_str
+
+    # Tesisat numaralarını temizle
+    df['TESISAT_NO'] = df['TESISAT_NO'].apply(clean_tesisat_no)
     
     # Tesisat numarası olan kayıtları filtrele
     df = df[df['TESISAT_NO'].notnull()]
+    df = df[df['TESISAT_NO'] != '']
+    df = df[df['TESISAT_NO'] != 'nan']
+    
+    # Tarih formatını düzelt
+    df['ILK_OKUMA_TARIHI'] = pd.to_datetime(df['ILK_OKUMA_TARIHI'], errors='coerce')
+    df['OKUMA_TARIHI'] = pd.to_datetime(df['OKUMA_TARIHI'], errors='coerce')
+    
+    # Model ile veri ön işleme
+    df = analiz_modeli.veri_on_isleme(df)
     
     # Zone veri dosyasını oku
     kullanici_zone_verileri = {}
@@ -93,7 +114,7 @@ def load_and_analyze_data(uploaded_file, zone_file):
             yorum, supheli_donemler, risk, risk_puan = analiz_modeli.gelismis_davranis_analizi(tesisat_verisi)
             
             davranis_sonuclari.append({
-                'TESISAT_NO': row['TESISAT_NO'],
+                'TESISAT_NO': row['TESISAT_NO'],  # Temizlenmiş tesisat no
                 'DAVRANIS_YORUMU': yorum,
                 'SUPHELI_DONEMLER': supheli_donemler,
                 'RISK_SEVIYESI': risk,
@@ -161,7 +182,7 @@ def create_demo_data():
     tesisat_sayisi = 500  # Daha küçük demo verisi
     
     for i in range(tesisat_sayisi):
-        tesisat_no = f"TS{1000 + i}"
+        tesisat_no = f"8000{300 + i}"  # Temiz tesisat numaraları
         
         # Basit tüketim patternleri
         pattern_type = np.random.choice(['normal', 'sifir_aralikli', 'yuksek'], p=[0.7, 0.2, 0.1])
@@ -220,7 +241,7 @@ def create_demo_data():
 
 # Başlık
 st.title("💧 Su Tüketim Davranış Analiz Dashboard")
-st.markdown("**Basitleştirilmiş Analiz Sistemi**")
+st.markdown("**Gelişmiş Analiz Sistemi**")
 
 # Dosya yükleme bölümü
 st.sidebar.header("📁 Dosya Yükleme")
@@ -367,7 +388,17 @@ with tab2:
         with col2:
             # Zone Karşılaştırma
             st.subheader("Zone Karşılaştırma")
-            st.dataframe(zone_analizi, use_container_width=True)
+            
+            # Zone verisini formatla
+            zone_gosterim = zone_analizi.copy()
+            if 'TOPLAM_TUKETIM' in zone_gosterim.columns:
+                zone_gosterim['TOPLAM_TUKETIM'] = zone_gosterim['TOPLAM_TUKETIM'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "0")
+            if 'TOPLAM_GELIR' in zone_gosterim.columns:
+                zone_gosterim['TOPLAM_GELIR'] = zone_gosterim['TOPLAM_GELIR'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "0")
+            if 'YUKSEK_RISK_ORANI' in zone_gosterim.columns:
+                zone_gosterim['YUKSEK_RISK_ORANI'] = zone_gosterim['YUKSEK_RISK_ORANI'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "0%")
+            
+            st.dataframe(zone_gosterim, use_container_width=True)
     else:
         st.info("Zone verisi bulunamadı")
 
@@ -403,16 +434,43 @@ with tab3:
         elif siralama == "Risk Puanı" and 'RISK_PUANI' in filtreli_veri.columns:
             filtreli_veri = filtreli_veri.sort_values('RISK_PUANI', ascending=False)
         
-        # Tablo gösterimi
+        # Tablo gösterimi - tesisat no formatını düzelt
+        gosterilecek_veri = filtreli_veri.copy()
+        
+        # Tesisat numarasını temizle ve formatla
+        def format_tesisat_no(tesisat_no):
+            if pd.isna(tesisat_no):
+                return ""
+            # String'e çevir ve temizle
+            cleaned = str(tesisat_no).strip()
+            # Sadece rakamları al
+            digits_only = re.sub(r'\D', '', cleaned)
+            return digits_only
+        
+        gosterilecek_veri['TESISAT_NO'] = gosterilecek_veri['TESISAT_NO'].apply(format_tesisat_no)
+        
         gosterilecek_kolonlar = ['TESISAT_NO', 'AKTIF_m3', 'TOPLAM_TUTAR']
-        if 'GUNLUK_ORT_TUKETIM_m3' in filtreli_veri.columns:
+        if 'GUNLUK_ORT_TUKETIM_m3' in gosterilecek_veri.columns:
             gosterilecek_kolonlar.append('GUNLUK_ORT_TUKETIM_m3')
-        if 'RISK_SEVIYESI' in filtreli_veri.columns:
+        if 'RISK_SEVIYESI' in gosterilecek_veri.columns:
             gosterilecek_kolonlar.append('RISK_SEVIYESI')
-        if 'DAVRANIS_YORUMU' in filtreli_veri.columns:
+        if 'DAVRANIS_YORUMU' in gosterilecek_veri.columns:
             gosterilecek_kolonlar.append('DAVRANIS_YORUMU')
         
-        st.dataframe(filtreli_veri[gosterilecek_kolonlar].head(50), use_container_width=True)
+        # Sayısal sütunları formatla
+        def format_numeric_columns(df):
+            formatted_df = df.copy()
+            if 'AKTIF_m3' in formatted_df.columns:
+                formatted_df['AKTIF_m3'] = formatted_df['AKTIF_m3'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "")
+            if 'TOPLAM_TUTAR' in formatted_df.columns:
+                formatted_df['TOPLAM_TUTAR'] = formatted_df['TOPLAM_TUTAR'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "")
+            if 'GUNLUK_ORT_TUKETIM_m3' in formatted_df.columns:
+                formatted_df['GUNLUK_ORT_TUKETIM_m3'] = formatted_df['GUNLUK_ORT_TUKETIM_m3'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "")
+            return formatted_df
+        
+        gosterilecek_veri_formatted = format_numeric_columns(gosterilecek_veri)
+        
+        st.dataframe(gosterilecek_veri_formatted[gosterilecek_kolonlar].head(50), use_container_width=True)
 
 # Footer
 st.markdown("---")
