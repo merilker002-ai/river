@@ -9,118 +9,175 @@ import warnings
 import re
 import os
 import pickle
+import requests
+import json
+import base64
+import io
+from typing import Dict, List, Optional
+import hashlib
 
 warnings.filterwarnings('ignore')
 
-# River (online learning) imports - required on your machine
-try:
-    from river import anomaly, preprocessing
-except Exception as e:
-    # If river is not installed, we'll inform user in the app UI later.
-    anomaly = None
-    preprocessing = None
-
 # ======================================================================
-# CONFIG
+# GITHUB-BASED MODEL MANAGER
 # ======================================================================
-st.set_page_config(
-    page_title="Su Tüketim Davranış Analiz Dashboard (River Entegre)",
-    page_icon="💧",
-    layout="wide"
-)
-
-MODEL_PATH = "river_model.pkl"
-
-# ======================================================================
-# RIVER MODEL HELPERS (ONLINE LEARNING)
-# ======================================================================
-def river_available():
-    return anomaly is not None and preprocessing is not None
-
-def load_or_create_river_model():
-    """
-    Load existing River model from disk or create a new pipeline.
-    The model is a pipeline: StandardScaler -> HalfSpaceTrees (anomaly detector)
-    """
-    if not river_available():
-        return None
-    if os.path.exists(MODEL_PATH):
+class GitHubModelManager:
+    def __init__(self, repo_owner: str, repo_name: str, token: str = None):
+        self.repo_owner = repo_owner
+        self.repo_name = repo_name
+        self.token = token
+        self.base_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/contents"
+        
+    def _get_headers(self):
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        if self.token:
+            headers["Authorization"] = f"token {self.token}"
+        return headers
+    
+    def download_model(self, filepath: str = "models/river_model.pkl") -> Optional[object]:
+        """GitHub'dan modeli indir"""
         try:
-            with open(MODEL_PATH, "rb") as f:
-                model = pickle.load(f)
-            st.info("🧠 River modeli yüklendi.")
-            return model
+            url = f"{self.base_url}/{filepath}"
+            response = requests.get(url, headers=self._get_headers())
+            
+            if response.status_code == 200:
+                content = response.json()
+                if 'content' in content:
+                    # Base64 decode
+                    model_data = base64.b64decode(content['content'])
+                    model = pickle.loads(model_data)
+                    st.sidebar.success("✅ Model GitHub'dan yüklendi")
+                    return model
+            return None
         except Exception as e:
-            st.warning(f"Model yüklenirken hata: {e}. Yeni model oluşturuluyor.")
-    # Create new model (try to be compatible with multiple river versions)
-    try:
-        model = preprocessing.StandardScaler() | anomaly.HalfSpaceTrees(seed=42, n_estimators=40)
-    except Exception:
-        model = preprocessing.StandardScaler() | anomaly.HalfSpaceTrees(seed=42)
-    st.info("🆕 Yeni River modeli oluşturuldu.")
-    return model
-
-def save_river_model(model):
-    if model is None:
-        return
-    with open(MODEL_PATH, "wb") as f:
-        pickle.dump(model, f)
-    st.success("💾 River modeli kaydedildi.")
-
-def update_model_with_new_data(df, model, feature_map=None):
-    """
-    Update River model with rows in df. Returns scores list (higher = more anomalous for HalfSpaceTrees.score_one).
-    feature_map: dict mapping expected feature names to df column names. If None, default mapping is used.
-    """
-    if model is None:
-        raise RuntimeError("River modeli yok. river kütüphanesinin kurulu olduğundan emin olun.")
-
-    if feature_map is None:
-        feature_map = {
-            "tuketim": "AKTIF_m3",
-            "gunluk_ort": "GUNLUK_ORT_TUKETIM_m3",
-            "tutar": "TOPLAM_TUTAR"
-        }
-
-    scores = []
-    # iterate rows without building a big structure in memory
-    for _, row in df.iterrows():
+            st.sidebar.warning(f"⚠️ GitHub'dan model yüklenemedi: {e}")
+            return None
+    
+    def upload_model(self, model: object, filepath: str = "models/river_model.pkl", 
+                    commit_message: str = "Auto-update model") -> bool:
+        """Modeli GitHub'a yükle"""
         try:
-            x = {
-                "tuketim": float(row.get(feature_map["tuketim"], 0.0)),
-                "gunluk_ort": float(row.get(feature_map["gunluk_ort"], 0.0)),
-                "tutar": float(row.get(feature_map["tutar"], 0.0))
+            # Modeli serialize et
+            model_bytes = pickle.dumps(model)
+            model_b64 = base64.b64encode(model_bytes).decode()
+            
+            # Önce mevcut dosyayı kontrol et (SHA gerekli)
+            url = f"{self.base_url}/{filepath}"
+            response = requests.get(url, headers=self._get_headers())
+            
+            data = {
+                "message": commit_message,
+                "content": model_b64,
+                "branch": "main"
             }
-        except Exception:
-            x = {k: 0.0 for k in feature_map.keys()}
-        # compute score (higher -> more anomalous for HalfSpaceTrees.score_one)
-        try:
-            score = model.score_one(x)
-        except Exception:
-            score = 0.0
-        # learn from this row (online)
-        try:
-            model.learn_one(x)
-        except Exception:
-            pass
-        scores.append(score)
-    # persist model
-    save_river_model(model)
-    return scores, model
+            
+            if response.status_code == 200:
+                existing_file = response.json()
+                data["sha"] = existing_file["sha"]
+            
+            # Dosyayı yükle
+            response = requests.put(url, headers=self._get_headers(), json=data)
+            
+            if response.status_code in [200, 201]:
+                st.sidebar.success("✅ Model GitHub'a yüklendi")
+                return True
+            else:
+                st.sidebar.error(f"❌ Model yüklenemedi: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            st.sidebar.error(f"❌ Model yükleme hatası: {e}")
+            return False
 
 # ======================================================================
-# VERI İŞLEME FONKSİYONLARI (İKİ DOSYA OKUYAN)
+# RIVER MODEL SERVICE (Lightweight - Bellek Optimize)
+# ======================================================================
+class RiverModelService:
+    def __init__(self, github_manager: GitHubModelManager):
+        self.github_manager = github_manager
+        self.model = None
+        self.load_model()
+    
+    def load_model(self):
+        """Modeli GitHub'dan yükle veya yeni oluştur"""
+        self.model = self.github_manager.download_model()
+        
+        if self.model is None:
+            # Yeni model oluştur
+            try:
+                from river import anomaly, preprocessing
+                self.model = preprocessing.StandardScaler() | anomaly.HalfSpaceTrees(
+                    n_estimators=25, 
+                    height=8,
+                    seed=42
+                )
+                st.sidebar.info("🆕 Yeni River modeli oluşturuldu")
+            except ImportError:
+                st.sidebar.warning("❌ River kütüphanesi kurulu değil")
+                self.model = None
+    
+    def incremental_learn(self, data: List[Dict]) -> Dict:
+        """Incremental learning yap"""
+        if self.model is None:
+            return {"status": "error", "message": "Model yok"}
+        
+        try:
+            scores = []
+            for record in data:
+                # Feature extraction
+                features = {
+                    "tuketim": float(record.get('AKTIF_m3', 0)),
+                    "gunluk_ort": float(record.get('GUNLUK_ORT_TUKETIM_m3', 0)),
+                    "tutar": float(record.get('TOPLAM_TUTAR', 0))
+                }
+                
+                # Score and learn
+                score = self.model.score_one(features)
+                self.model.learn_one(features)
+                scores.append(score)
+            
+            # Modeli GitHub'a kaydet
+            self.github_manager.upload_model(self.model)
+            
+            return {
+                "status": "success",
+                "processed_records": len(data),
+                "avg_score": np.mean(scores) if scores else 0,
+                "latest_scores": scores[-10:]  # Son 10 skor
+            }
+            
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def predict(self, data: Dict) -> Dict:
+        """Anomali skoru tahmini"""
+        if self.model is None:
+            return {"score": 0.0, "status": "error"}
+        
+        try:
+            features = {
+                "tuketim": float(data.get('AKTIF_m3', 0)),
+                "gunluk_ort": float(data.get('GUNLUK_ORT_TUKETIM_m3', 0)),
+                "tutar": float(data.get('TOPLAM_TUTAR', 0))
+            }
+            
+            score = self.model.score_one(features)
+            return {"score": score, "status": "success"}
+        except:
+            return {"score": 0.0, "status": "error"}
+
+# ======================================================================
+# VERİ İŞLEME FONKSİYONLARI
 # ======================================================================
 @st.cache_data
 def load_and_analyze_data(uploaded_file, zone_file):
     """İki dosyadan veriyi okur ve analiz eder"""
     try:
-        # Ana veri dosyasını oku
         df = pd.read_excel(uploaded_file)
         st.success(f"✅ Ana veri başarıyla yüklendi: {len(df)} kayıt")
     except Exception as e:
         st.error(f"❌ Ana dosya okuma hatası: {e}")
-        return None, None, None, None
+        return None, None, None
 
     # Tarih formatını düzelt
     df['ILK_OKUMA_TARIHI'] = pd.to_datetime(df['ILK_OKUMA_TARIHI'], format='%Y%m%d', errors='coerce')
@@ -131,36 +188,28 @@ def load_and_analyze_data(uploaded_file, zone_file):
     
     # Zone veri dosyasını oku
     kullanici_zone_verileri = {}
-    zone_excel_df = None
     if zone_file is not None:
         try:
             zone_excel_df = pd.read_excel(zone_file)
             st.success(f"✅ Zone veri dosyası başarıyla yüklendi: {len(zone_excel_df)} kayıt")
             
-            # Zone verilerini işle (kullanici_zone_verileri için)
             for idx, row in zone_excel_df.iterrows():
-                # Karne no ve adını ayır
                 if 'KARNE NO VE ADI' in row:
                     karne_adi = str(row['KARNE NO VE ADI']).strip()
-                    
-                    # Karne numarasını çıkar (ilk 4 rakam)
                     karne_no_match = re.search(r'(\d{4})', karne_adi)
                     if karne_no_match:
                         karne_no = karne_no_match.group(1)
-                        
-                        # Zone bilgilerini topla
                         zone_bilgisi = {
                             'ad': karne_adi,
                             'verilen_su': row.get('VERİLEN SU MİKTARI M3', 0),
                             'tahakkuk_m3': row.get('TAHAKKUK M3', 0),
                             'kayip_oran': row.get('BRÜT KAYIP KAÇAK ORANI\n%', 0)
                         }
-                        
                         kullanici_zone_verileri[karne_no] = zone_bilgisi
         except Exception as e:
             st.error(f"❌ Zone veri dosyası yüklenirken hata: {e}")
 
-    # Davranış analizi fonksiyonları
+    # Davranış analizi
     def perform_behavior_analysis(df):
         son_okumalar = df.sort_values('OKUMA_TARIHI').groupby('TESISAT_NO').last().reset_index()
         son_okumalar['OKUMA_PERIYODU_GUN'] = (son_okumalar['OKUMA_TARIHI'] - son_okumalar['ILK_OKUMA_TARIHI']).dt.days
@@ -171,87 +220,34 @@ def load_and_analyze_data(uploaded_file, zone_file):
 
     son_okumalar = perform_behavior_analysis(df)
     
-    # Davranış analizi fonksiyonu (şüpheli tesisat tespiti)
+    # Kısaltılmış davranış analizi fonksiyonu
     def tesisat_davranis_analizi(tesisat_no, son_okuma_row, df):
         tesisat_verisi = df[df['TESISAT_NO'] == tesisat_no].sort_values('OKUMA_TARIHI')
-
+        
         if len(tesisat_verisi) < 3:
             return "Yetersiz veri", "Yetersiz kayıt", "Orta"
 
         tuketimler = tesisat_verisi['AKTIF_m3'].values
-        tarihler_series = tesisat_verisi['OKUMA_TARIHI']
-
-        # Sıfır tüketim analizi
+        
+        # Basitleştirilmiş risk analizi
         sifir_sayisi = sum(tuketimler == 0)
-
-        # Varyasyon analizi
         std_dev = np.std(tuketimler) if len(tuketimler) > 1 else 0
         mean_tuketim = np.mean(tuketimler) if len(tuketimler) > 0 else 0
         varyasyon_katsayisi = std_dev / mean_tuketim if mean_tuketim > 0 else 0
-
-        # Trend analizi (son 3 dönem)
-        if len(tuketimler) >= 3:
-            son_uc = tuketimler[-3:]
-            trend = "artış" if son_uc[2] > son_uc[0] * 1.2 else "azalış" if son_uc[2] < son_uc[0] * 0.8 else "stabil"
-        else:
-            trend = "belirsiz"
-
-        # Şüpheli durum tespiti ve risk seviyesi
-        suphe_aciklamasi = ""
-        suphe_donemleri = []
+        
         risk_seviyesi = "Düşük"
-
-        # 1. Düzensiz sıfır tüketim paterni
-        if sifir_sayisi >= 3:
-            sifir_indisler = np.where(tuketimler == 0)[0]
-            if len(sifir_indisler) >= 3:
-                ardisik_olmayan = sum(np.diff(sifir_indisler) > 1) >= 2
-                if ardisik_olmayan:
-                    suphe_aciklamasi += "Düzensiz sıfır tüketim paterni. "
-                    risk_seviyesi = "Yüksek"
-                    for idx in sifir_indisler:
-                        tarih_obj = pd.Timestamp(tarihler_series.iloc[idx])
-                        suphe_donemleri.append(tarih_obj.strftime('%m/%Y'))
-
-        # 2. Ani tüketim değişiklikleri
-        if varyasyon_katsayisi > 1.5 and mean_tuketim > 5:
-            suphe_aciklamasi += "Tüketimde yüksek dalgalanma. "
-            risk_seviyesi = "Orta" if risk_seviyesi == "Düşük" else risk_seviyesi
-
-        # 3. Trend analizi
-        if trend == "artış" and mean_tuketim > 20:
-            suphe_aciklamasi += "Yükselen tüketim trendi. "
-            risk_seviyesi = "Orta" if risk_seviyesi == "Düşük" else risk_seviyesi
-
-        # 4. Son dönem sıfır tüketim
-        if tuketimler[-1] == 0 and len(tuketimler) > 1:
-            suphe_aciklamasi += "Son dönem sıfır tüketim. "
-            risk_seviyesi = "Yüksek" if sifir_sayisi >= 2 else "Orta"
-
-        # Şüpheli dönemler varsa risk en az Orta olmalı
-        if suphe_donemleri and risk_seviyesi == "Düşük":
+        if sifir_sayisi >= 3 or varyasyon_katsayisi > 1.5 or tuketimler[-1] == 0:
+            risk_seviyesi = "Yüksek"
+        elif sifir_sayisi >= 1 or varyasyon_katsayisi > 0.8:
             risk_seviyesi = "Orta"
 
-        # Yorum kütüphanesi
-        yorumlar_normal = ["Normal tüketim paterni", "Stabil tüketim alışkanlığı"]
-        yorumlar_supheli = [
-            "Tüketim alışkanlıklarında değişiklik gözlemleniyor",
-            "Düzensiz tüketim paterni dikkat çekici",
-            "Tüketim davranışında tutarsızlık mevcut",
-            "Değişken tüketim alışkanlıkları",
-            "Tüketim paterninde olağandışı dalgalanma"
-        ]
+        yorumlar = ["Normal tüketim paterni"] if risk_seviyesi == "Düşük" else ["Tüketimde dalgalanma gözlemleniyor"]
+        
+        return np.random.choice(yorumlar), "Yok", risk_seviyesi
 
-        if not suphe_aciklamasi:
-            davranis_yorumu = np.random.choice(yorumlar_normal)
-        else:
-            davranis_yorumu = np.random.choice(yorumlar_supheli)
-
-        return davranis_yorumu, ", ".join(suphe_donemleri) if suphe_donemleri else "Yok", risk_seviyesi
-
-    # Tüm tesisatlar için davranış analizi yap
+    # Tüm tesisatlar için davranış analizi
     davranis_sonuclari = []
-    for i, (idx, row) in enumerate(son_okumalar.iterrows()):
+    for idx, row in son_okumalar.iterrows():
         yorum, supheli_donemler, risk = tesisat_davranis_analizi(row['TESISAT_NO'], row, df)
         davranis_sonuclari.append({
             'TESISAT_NO': row['TESISAT_NO'],
@@ -277,75 +273,96 @@ def load_and_analyze_data(uploaded_file, zone_file):
         }).reset_index()
         zone_analizi.columns = ['KARNE_NO', 'TESISAT_SAYISI', 'TOPLAM_TUKETIM', 'TOPLAM_GELIR']
 
-        # Zone risk analizi
-        ekim_2024_risk = ekim_2024_df.merge(son_okumalar[['TESISAT_NO', 'RISK_SEVIYESI']], on='TESISAT_NO', how='left')
-        zone_risk_analizi = ekim_2024_risk.groupby('KARNE_NO')['RISK_SEVIYESI'].apply(
-            lambda x: (x == 'Yüksek').sum() if 'Yüksek' in x.values else 0
-        ).reset_index(name='YUKSEK_RISKLI_TESISAT')
-
-        zone_analizi = zone_analizi.merge(zone_risk_analizi, on='KARNE_NO', how='left')
-        zone_analizi['YUKSEK_RISK_ORANI'] = (zone_analizi['YUKSEK_RISKLI_TESISAT'] / zone_analizi['TESISAT_SAYISI']) * 100
-
-        # Kullanıcı zone verilerini birleştir
         if kullanici_zone_verileri:
             zone_analizi['KARNE_NO'] = zone_analizi['KARNE_NO'].astype(str)
             kullanici_df = pd.DataFrame.from_dict(kullanici_zone_verileri, orient='index').reset_index()
             kullanici_df = kullanici_df.rename(columns={'index': 'KARNE_NO'})
             zone_analizi = zone_analizi.merge(kullanici_df, on='KARNE_NO', how='left')
 
-    return df, son_okumalar, zone_analizi, kullanici_zone_verileri
+    return df, son_okumalar, zone_analizi
 
 
 
 
 # ======================================================================
-# STREAMLIT ARAYÜZ (Güncel: incremental uploader kaldırıldı, zone -> otomatik öğrenme)
+# STREAMLIT ARAYÜZ - PROFESYONEL MİMARİ
 # ======================================================================
-st.title("💧 Su Tüketim Davranış Analiz Dashboard (River Entegre)")
 
-# Sidebar - dosya yükleme
-st.sidebar.header("📁 Veri ve Model")
+# GitHub configuration - BUNLARI STREAMLIT CLOUD SECRETS'A EKLEYİN
+GITHUB_OWNER = "your_username"  # GitHub kullanıcı adınız
+GITHUB_REPO = "your_repo_name"  # Repo adı
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", None)  # Streamlit Cloud secrets
+
+# Initialize services
+github_manager = GitHubModelManager(GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN)
+model_service = RiverModelService(github_manager)
+
+st.set_page_config(
+    page_title="Su Tüketim AI Analiz - GitHub + Streamlit",
+    page_icon="💧",
+    layout="wide"
+)
+
+st.title("💧 Su Tüketim AI Analiz Sistemi")
+st.markdown("🚀 **Profesyonel Mimari: GitHub + Streamlit + Incremental Learning**")
+
+# Sidebar - Model Yönetimi
+st.sidebar.header("🧠 AI Model Yönetimi")
+
+# Model durumu
+if model_service.model is not None:
+    st.sidebar.success("✅ River Modeli Aktif")
+else:
+    st.sidebar.warning("⚠️ River Modeli Devre Dışı")
+
+# Model işlemleri
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    if st.button("🔄 Modeli Güncelle"):
+        model_service.load_model()
+        st.rerun()
+
+with col2:
+    if st.button("🗑️ Modeli Sıfırla"):
+        # GitHub'dan modeli sil (opsiyonel - manual yapılabilir)
+        st.info("Modeli sıfırlamak için GitHub'dan models/river_model.pkl dosyasını silin")
+        st.rerun()
+
+# Dosya yükleme
+st.sidebar.header("📁 Veri Yükleme")
 uploaded_file = st.sidebar.file_uploader(
-    "Ana Excel dosyasını seçin (yavuz.xlsx)",
+    "Ana Excel dosyasını seçin",
     type=["xlsx"],
     help="Su tüketim verilerini içeren Excel dosyasını yükleyin"
 )
 
 zone_file = st.sidebar.file_uploader(
-    "Zone Excel dosyasını seçin (yavuzeli merkez ekim.xlsx)",
+    "Zone Excel dosyasını seçin", 
     type=["xlsx"],
     help="Zone bilgilerini içeren Excel dosyasını yükleyin"
 )
 
-# Model yönetimi
-model = load_or_create_river_model() if river_available() else None
-if not river_available():
-    st.sidebar.warning("River kütüphanesi yüklenmemiş. Online öğrenme çalışmaz. `requirements.txt` içine 'river==0.21.0' ekleyin.")
+# Incremental Learning Kontrolü
+st.sidebar.header("🔁 Incremental Learning")
+auto_learn = st.sidebar.checkbox("Otomatik Öğrenme", value=True, 
+                                help="Yeni veri yüklendiğinde otomatik öğren")
 
-if st.sidebar.button("🔁 Modeli Sıfırla (sil)"):
-    try:
-        if os.path.exists(MODEL_PATH):
-            os.remove(MODEL_PATH)
-        model = load_or_create_river_model()
-        st.sidebar.success("Model sıfırlandı.")
-    except Exception as e:
-        st.sidebar.error(f"Model sıfırlanırken hata: {e}")
+batch_size = st.sidebar.slider("Batch Boyutu", 10, 1000, 100, 
+                              help="Aynı anda işlenecek kayıt sayısı")
 
-# Demo butonu (orijinal davranışı koruyor)
-if st.sidebar.button("🎮 Demo Modunda Çalıştır"):
-    st.info("Demo modu aktif! Örnek verilerle çalışılıyor...")
+# Demo verisi
+if st.sidebar.button("🎮 Demo Modu"):
+    # Demo verisi oluştur
     np.random.seed(42)
-    
     demo_data = []
-    for i in range(1000):
+    for i in range(500):  # Daha küçük demo
         tesisat_no = f"TS{1000 + i}"
         aktif_m3 = np.random.gamma(2, 10)
-        toplam_tutar = aktif_m3 * 15 + np.random.normal(0, 10)
         
         demo_data.append({
             'TESISAT_NO': tesisat_no,
             'AKTIF_m3': max(aktif_m3, 0.1),
-            'TOPLAM_TUTAR': max(toplam_tutar, 0),
+            'TOPLAM_TUTAR': aktif_m3 * 15,
             'ILK_OKUMA_TARIHI': pd.Timestamp('2023-01-01'),
             'OKUMA_TARIHI': pd.Timestamp('2024-10-31'),
             'KARNE_NO': f"ZONE{np.random.randint(1, 6)}"
@@ -355,114 +372,77 @@ if st.sidebar.button("🎮 Demo Modunda Çalıştır"):
     son_okumalar = df.copy()
     son_okumalar['OKUMA_PERIYODU_GUN'] = 300
     son_okumalar['GUNLUK_ORT_TUKETIM_m3'] = son_okumalar['AKTIF_m3'] / son_okumalar['OKUMA_PERIYODU_GUN']
-    son_okumalar['GUNLUK_ORT_TUKETIM_m3'] = son_okumalar['GUNLUK_ORT_TUKETIM_m3'].clip(lower=0.001, upper=100)
     
-    # Heuristic risk (demo)
     risk_dagilimi = np.random.choice(['Düşük', 'Orta', 'Yüksek'], size=len(son_okumalar), p=[0.7, 0.2, 0.1])
     son_okumalar['RISK_SEVIYESI'] = risk_dagilimi
-    son_okumalar['DAVRANIS_YORUMU'] = "Demo verisi - analiz edildi"
+    son_okumalar['DAVRANIS_YORUMU'] = "Demo verisi"
     son_okumalar['SUPHELI_DONEMLER'] = "Yok"
     
     zone_analizi = df.groupby('KARNE_NO').agg({
         'TESISAT_NO': 'count',
-        'AKTIF_m3': 'sum',
+        'AKTIF_m3': 'sum', 
         'TOPLAM_TUTAR': 'sum'
     }).reset_index()
-    zone_analizi.columns = ['KARNE_NO', 'TESISAT_SAYISI', 'TOPLAM_TUKETIM', 'TOPLAM_GELIR']
     
-    # Demo: river güncelle (opsiyonel)
-    if river_available():
-        try:
-            demo_zone_df = df.copy()
-            scores, model = update_model_with_new_data(demo_zone_df, model)
-            # merge scores -> son_okumalar (tesisat bazında ortalama) - benzetme demo için
-            demo_scores = pd.DataFrame({'TESISAT_NO': demo_zone_df['TESISAT_NO'], 'RIVER_SCORE': scores})
-            mean_scores = demo_scores.groupby('TESISAT_NO')['RIVER_SCORE'].mean().reset_index().rename(columns={'RIVER_SCORE': 'RIVER_SCORE_MEAN'})
-            son_okumalar = son_okumalar.merge(mean_scores, on='TESISAT_NO', how='left')
-            st.sidebar.success(f"🧠 Demo zone verisi ile model güncellendi: {len(demo_zone_df)} satır.")
-        except Exception as e:
-            st.sidebar.warning(f"Demo sırasında River güncelleme hatası: {e}")
-    
-    st.success("✅ Demo verisi başarıyla oluşturuldu!")
+    st.success("✅ Demo verisi oluşturuldu!")
 
-# Eğer dosya yüklendiyse veri yükleme ve analiz
-if uploaded_file is not None:
-    df, son_okumalar, zone_analizi, kullanici_zone_verileri = load_and_analyze_data(uploaded_file, zone_file)
+elif uploaded_file is not None:
+    # Gerçek veri yükleme
+    df, son_okumalar, zone_analizi = load_and_analyze_data(uploaded_file, zone_file)
+    
+    # Incremental Learning
+    if auto_learn and model_service.model is not None and df is not None:
+        with st.sidebar:
+            with st.spinner("🤖 AI öğreniyor..."):
+                # Batch processing - belleği koru
+                records = df.head(batch_size).to_dict('records')
+                result = model_service.incremental_learn(records)
+                
+                if result["status"] == "success":
+                    st.success(f"✅ {result['processed_records']} kayıt işlendi")
+                    
+                    # River skorlarını ekle
+                    if 'RIVER_SCORE_MEAN' not in son_okumalar.columns:
+                        # Tesisat bazında River skorları hesapla
+                        river_scores = []
+                        for _, row in son_okumalar.iterrows():
+                            prediction = model_service.predict(row.to_dict())
+                            river_scores.append(prediction['score'])
+                        
+                        son_okumalar['RIVER_SCORE'] = river_scores
+                else:
+                    st.error(f"❌ Öğrenme hatası: {result['message']}")
 else:
-    st.warning("⚠️ Lütfen Excel dosyalarını yükleyin veya Demo modunu kullanın")
+    st.warning("⚠️ Lütfen Excel dosyasını yükleyin veya Demo modunu kullanın")
     st.stop()
 
-# ====== BURADA: Zone dosyası yüklendiyse otomatik River öğrenmesini tetikle ======
-if zone_file is not None and river_available():
-    try:
-        # yeniden zone_df oku (orijinal load_and_analyze_data sadece özetlediği için)
-        zone_df_for_learning = pd.read_excel(zone_file)
-        # prepare zone_df_for_learning columns to include feature_map keys if necessary
-        # (expects AKTIF_m3, GUNLUK_ORT_TUKETIM_m3, TOPLAM_TUTAR or we compute simple proxies)
-        if 'GUNLUK_ORT_TUKETIM_m3' not in zone_df_for_learning.columns:
-            # try to compute if there are period columns, else fallback to AKTIF_m3
-            if 'OKUMA_PERIYODU_GUN' in zone_df_for_learning.columns and 'AKTIF_m3' in zone_df_for_learning.columns:
-                zone_df_for_learning['GUNLUK_ORT_TUKETIM_m3'] = zone_df_for_learning['AKTIF_m3'] / zone_df_for_learning['OKUMA_PERIYODU_GUN'].clip(lower=1)
-            else:
-                zone_df_for_learning['GUNLUK_ORT_TUKETIM_m3'] = zone_df_for_learning.get('AKTIF_m3', 0.0)
-        if 'TOPLAM_TUTAR' not in zone_df_for_learning.columns:
-            zone_df_for_learning['TOPLAM_TUTAR'] = zone_df_for_learning.get('TOPLAM_TUTAR', 0.0)
-        # ensure AKTIF_m3 exists
-        if 'AKTIF_m3' not in zone_df_for_learning.columns:
-            zone_df_for_learning['AKTIF_m3'] = zone_df_for_learning.get('AKTIF_m3', 0.0)
-        
-        scores, model = update_model_with_new_data(zone_df_for_learning, model)
-        zone_df_for_learning['RIVER_SCORE'] = scores
-        st.sidebar.success(f"🧠 Zone dosyası ile River modeli güncellendi: {len(zone_df_for_learning)} satır.")
-        
-        # Merge incremental-like scores into son_okumalar as mean per TESISAT_NO if column exists
-        try:
-            if 'TESISAT_NO' in zone_df_for_learning.columns:
-                mean_scores = zone_df_for_learning.groupby('TESISAT_NO')['RIVER_SCORE'].mean().reset_index().rename(columns={'RIVER_SCORE': 'RIVER_SCORE_MEAN'})
-                son_okumalar = son_okumalar.merge(mean_scores, on='TESISAT_NO', how='left')
-        except Exception:
-            pass
-    except Exception as e:
-        st.sidebar.error(f"River ile otomatik öğrenme sırasında hata: {e}")
+# ======================================================================
+# DASHBOARD GÖRSELLEŞTİRME
+# ======================================================================
 
 # Genel Metrikler
 if son_okumalar is not None:
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric(
-            label="📊 Toplam Tesisat",
-            value=f"{len(son_okumalar):,}"
-        )
+        st.metric("📊 Toplam Tesisat", f"{len(son_okumalar):,}")
     
     with col2:
-        st.metric(
-            label="💧 Toplam Tüketim",
-            value=f"{son_okumalar['AKTIF_m3'].sum():,.0f} m³"
-        )
+        st.metric("💧 Toplam Tüketim", f"{son_okumalar['AKTIF_m3'].sum():,.0f} m³")
     
     with col3:
-        st.metric(
-            label="💰 Toplam Gelir",
-            value=f"{son_okumalar['TOPLAM_TUTAR'].sum():,.0f} TL"
-        )
+        st.metric("💰 Toplam Gelir", f"{son_okumalar['TOPLAM_TUTAR'].sum():,.0f} TL")
     
     with col4:
-        # Risk dağılımı
         yuksek_riskli = len(son_okumalar[son_okumalar['RISK_SEVIYESI'] == 'Yüksek'])
-        st.metric(
-            label="🚨 Yüksek Riskli Tesisat (Heuristik)",
-            value=f"{yuksek_riskli}"
-        )
+        st.metric("🚨 Yüksek Riskli", f"{yuksek_riskli}")
 
-# (Diğer tüm sekmeler ve görselleştirmeler aynen korunmuştur)
-# Tab Menü (görselleştirme temel yapı aynı)
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+# Tab Menü
+tab1, tab2, tab3, tab4 = st.tabs([
     "📈 Genel Görünüm", 
     "🗺️ Zone Analizi", 
-    "🔍 Detaylı Analiz", 
-    "📊 İleri Analiz",
-    "🔥 Ateş Böceği Görünümü"
+    "🔍 Detaylı Analiz",
+    "🤖 AI Insights"
 ])
 
 with tab1:
@@ -472,181 +452,95 @@ with tab1:
         with col1:
             fig1 = px.histogram(son_okumalar, x='GUNLUK_ORT_TUKETIM_m3', 
                               title='Günlük Tüketim Dağılımı',
-                              labels={'GUNLUK_ORT_TUKETIM_m3': 'Günlük Tüketim (m³)'},
                               color_discrete_sequence=['#3498DB'])
-            fig1.update_layout(showlegend=False)
             st.plotly_chart(fig1, use_container_width=True)
         
         with col2:
-            color_col = 'RISK_SEVIYESI' if 'RISK_SEVIYESI' in son_okumalar.columns else None
             fig2 = px.scatter(son_okumalar, x='AKTIF_m3', y='TOPLAM_TUTAR',
-                            color=color_col,
-                            title='Tüketim-Tutar İlişkisi (Risk Seviyeli)',
-                            labels={'AKTIF_m3': 'Tüketim (m³)', 'TOPLAM_TUTAR': 'Toplam Tutar (TL)'},
+                            color='RISK_SEVIYESI',
+                            title='Tüketim-Tutar İlişkisi',
                             color_discrete_map={'Düşük': 'green', 'Orta': 'orange', 'Yüksek': 'red'})
             st.plotly_chart(fig2, use_container_width=True)
-        
-        if 'RIVER_SCORE_MEAN' in son_okumalar.columns:
-            st.markdown("**🧠 River (online) tarafından hesaplanan ortalama anomali skorları (tesisat bazında)**")
-            st.dataframe(son_okumalar[['TESISAT_NO', 'RIVER_SCORE_MEAN']].sort_values('RIVER_SCORE_MEAN', ascending=False).head(20), use_container_width=True)
 
 with tab2:
     if zone_analizi is not None:
         col1, col2 = st.columns(2)
         
         with col1:
-            fig4 = px.pie(zone_analizi, values='TOPLAM_TUKETIM', names='KARNE_NO',
-                        title='Zone Bazlı Tüketim Dağılımı')
-            st.plotly_chart(fig4, use_container_width=True)
+            fig3 = px.pie(zone_analizi, values='TOPLAM_TUKETIM', names='KARNE_NO',
+                         title='Zone Bazlı Tüketim Dağılımı')
+            st.plotly_chart(fig3, use_container_width=True)
         
         with col2:
-            fig5 = px.bar(zone_analizi, x='KARNE_NO', y='TESISAT_SAYISI',
-                        title='Zone Bazlı Tesisat Sayısı',
-                        labels={'KARNE_NO': 'Zone', 'TESISAT_SAYISI': 'Tesisat Sayısı'},
-                        color_discrete_sequence=['#E74C3C'])
-            st.plotly_chart(fig5, use_container_width=True)
-        
-        st.subheader("Zone Karşılaştırma Tablosu")
-        zone_karsilastirma = zone_analizi[['KARNE_NO', 'TESISAT_SAYISI', 'TOPLAM_TUKETIM', 'TOPLAM_GELIR', 'YUKSEK_RISK_ORANI']].copy()
-        if 'ad' in zone_analizi.columns:
-            zone_karsilastirma['Zone Adı'] = zone_analizi['ad']
-        if 'verilen_su' in zone_analizi.columns:
-            zone_karsilastirma['Verilen Su (m³)'] = zone_analizi['verilen_su']
-            zone_karsilastirma['Tahakkuk (m³)'] = zone_analizi['tahakkuk_m3']
-            zone_karsilastirma['Kayıp Oranı (%)'] = zone_analizi['kayip_oran']
-        
-        st.dataframe(zone_karsilastirma, use_container_width=True)
-    else:
-        st.info("Zone verisi bulunamadı")
+            fig4 = px.bar(zone_analizi, x='KARNE_NO', y='TESISAT_SAYISI',
+                         title='Zone Bazlı Tesisat Sayısı')
+            st.plotly_chart(fig4, use_container_width=True)
 
 with tab3:
     if son_okumalar is not None:
+        # Filtreleme ve detaylı analiz
         col1, col2 = st.columns([1, 2])
         
         with col1:
-            st.subheader("Filtreleme Seçenekleri")
-            
-            tuketim_range = st.slider(
-                "Tüketim Aralığı (m³)",
-                min_value=0,
-                max_value=int(son_okumalar['AKTIF_m3'].max()) if len(son_okumalar) > 0 else 100,
-                value=[0, 100],
-                help="Tüketim değerine göre filtreleme yapın"
-            )
-            
+            st.subheader("Filtreleme")
             risk_seviyeleri = st.multiselect(
                 "Risk Seviyeleri",
                 options=['Düşük', 'Orta', 'Yüksek'],
                 default=['Yüksek', 'Orta']
             )
-            
-            siralama = st.selectbox(
-                "Sıralama Türü",
-                options=['En Yüksek Tüketim', 'En Düşük Tüketim', 'En Yüksek Risk'],
-                index=2
-            )
         
         with col2:
-            min_tuketim, max_tuketim = tuketim_range
-            filtreli_veri = son_okumalar[
-                (son_okumalar['AKTIF_m3'] >= min_tuketim) & 
-                (son_okumalar['AKTIF_m3'] <= max_tuketim) &
-                (son_okumalar['RISK_SEVIYESI'].isin(risk_seviyeleri))
-            ]
-            
-            if siralama == 'En Yüksek Tüketim':
-                gosterilecek_veri = filtreli_veri.nlargest(20, 'AKTIF_m3')
-            elif siralama == 'En Düşük Tüketim':
-                gosterilecek_veri = filtreli_veri.nsmallest(20, 'AKTIF_m3')
-            else:
-                risk_sirasi = {'Yüksek': 3, 'Orta': 2, 'Düşük': 1}
-                filtreli_veri['RISK_SIRASI'] = filtreli_veri['RISK_SEVIYESI'].map(risk_sirasi)
-                gosterilecek_veri = filtreli_veri.nlargest(20, ['RISK_SIRASI', 'AKTIF_m3'])
-            
+            filtreli_veri = son_okumalar[son_okumalar['RISK_SEVIYESI'].isin(risk_seviyeleri)]
             st.dataframe(
-                gosterilecek_veri[['TESISAT_NO', 'AKTIF_m3', 'TOPLAM_TUTAR', 'GUNLUK_ORT_TUKETIM_m3', 'RISK_SEVIYESI', 'DAVRANIS_YORUMU']].round(3),
+                filtreli_veri[['TESISAT_NO', 'AKTIF_m3', 'TOPLAM_TUTAR', 'RISK_SEVIYESI', 'DAVRANIS_YORUMU']].head(20),
                 use_container_width=True
             )
 
 with tab4:
-    if son_okumalar is not None:
+    st.header("🤖 AI - River Model Insights")
+    
+    if son_okumalar is not None and 'RIVER_SCORE' in son_okumalar.columns:
         col1, col2 = st.columns(2)
         
         with col1:
-            risk_dagilim = son_okumalar['RISK_SEVIYESI'].value_counts()
-            fig6 = px.pie(values=risk_dagilim.values, names=risk_dagilim.index,
-                         title='Risk Seviyeleri Dağılımı',
-                         color_discrete_map={'Düşük': 'green', 'Orta': 'orange', 'Yüksek': 'red'})
-            st.plotly_chart(fig6, use_container_width=True)
+            fig5 = px.histogram(son_okumalar, x='RIVER_SCORE', 
+                              title='River Anomali Skor Dağılımı',
+                              nbins=30)
+            st.plotly_chart(fig5, use_container_width=True)
         
         with col2:
-            numeric_cols = son_okumalar.select_dtypes(include=[np.number]).columns
-            corr_matrix = son_okumalar[numeric_cols].corr()
-            
-            fig7 = px.imshow(corr_matrix, 
-                           title='Korelasyon Matrisi',
-                           color_continuous_scale='RdBu_r',
-                           aspect="auto")
-            st.plotly_chart(fig7, use_container_width=True)
+            # En yüksek anomali skorlu tesisatlar
+            high_anomaly = son_okumalar.nlargest(10, 'RIVER_SCORE')[['TESISAT_NO', 'RIVER_SCORE', 'AKTIF_m3', 'RISK_SEVIYESI']]
+            st.dataframe(high_anomaly, use_container_width=True)
         
-        fig8 = px.box(son_okumalar, y='AKTIF_m3', 
-                     title='Tüketim Dağılımı - Aykırı Değer Analizi',
-                     color_discrete_sequence=['#F39C12'])
-        st.plotly_chart(fig8, use_container_width=True)
-        
-        if 'RIVER_SCORE_MEAN' in son_okumalar.columns:
-            fig_anom = px.histogram(
-                son_okumalar,
-                x='RIVER_SCORE_MEAN',
-                nbins=50,
-                title='River Anomali Skoru Dağılımı (Tesisat Bazlı Ortalama)'
+        # AI + Heuristic kombinasyonu
+        st.subheader("🔥 Kombine Risk Analizi")
+        son_okumalar['KOMBINE_RISK'] = np.where(
+            (son_okumalar['RISK_SEVIYESI'] == 'Yüksek') | (son_okumalar['RIVER_SCORE'] > 0.7),
+            'Yüksek', 
+            np.where(
+                (son_okumalar['RISK_SEVIYESI'] == 'Orta') | (son_okumalar['RIVER_SCORE'] > 0.4),
+                'Orta', 
+                'Düşük'
             )
-            st.plotly_chart(fig_anom, use_container_width=True)
-
-with tab5:
-    st.header("🔥 Ateş Böceği Görünümü - Şüpheli Tesisatlar (Heuristik ve River)")
-    
-    if son_okumalar is not None:
-        # Combine heuristic high risk and river high score
-        # Define high river score threshold heuristically (you can tune later)
-        if 'RIVER_SCORE_MEAN' in son_okumalar.columns:
-            son_okumalar['RIVER_ANOMALY_FLAG'] = son_okumalar['RIVER_SCORE_MEAN'] > 0.5  # tuneable
-        else:
-            son_okumalar['RIVER_ANOMALY_FLAG'] = False
+        )
         
-        # Yüksek riskli (heuristic)
-        yuksek_riskli = son_okumalar[son_okumalar['RISK_SEVIYESI'] == 'Yüksek']
-        # Ayrıca river ile belirlenen şüpheliler
-        river_supheli = son_okumalar[son_okumalar['RIVER_ANOMALY_FLAG'] == True]
+        fig6 = px.scatter(son_okumalar, x='AKTIF_m3', y='RIVER_SCORE',
+                         color='KOMBINE_RISK', size='TOPLAM_TUTAR',
+                         hover_data=['TESISAT_NO', 'DAVRANIS_YORUMU'],
+                         title='AI + Heuristic Kombine Risk Analizi',
+                         color_discrete_map={'Yüksek': 'red', 'Orta': 'orange', 'Düşük': 'green'})
+        st.plotly_chart(fig6, use_container_width=True)
         
-        combined_supheli = pd.concat([yuksek_riskli, river_supheli]).drop_duplicates('TESISAT_NO')
-        
-        if len(combined_supheli) > 0:
-            st.success(f"🚨 {len(combined_supheli)} adet yüksek riskli/şüpheli tesisat tespit edildi!")
-            fig9 = px.scatter(combined_supheli, x='AKTIF_m3', y='TOPLAM_TUTAR',
-                            size='GUNLUK_ORT_TUKETIM_m3',
-                            color='RIVER_ANOMALY_FLAG' if 'RIVER_ANOMALY_FLAG' in combined_supheli.columns else 'RISK_SEVIYESI',
-                            hover_name='TESISAT_NO',
-                            title='🔥 Ateş Böceği Görünümü - Model Destekli',
-                            labels={'AKTIF_m3': 'Tüketim (m³)', 'TOPLAM_TUTAR': 'Toplam Tutar (TL)'})
-            fig9.update_traces(marker=dict(symbol='star', line=dict(width=2)))
-            st.plotly_chart(fig9, use_container_width=True)
-            
-            for idx, row in combined_supheli.iterrows():
-                with st.expander(f"🚨 Tesisat No: {row['TESISAT_NO']} - {row.get('DAVRANIS_YORUMU','')}"):
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Tüketim", f"{row['AKTIF_m3']:.1f} m³")
-                    with col2:
-                        st.metric("Tutar", f"{row['TOPLAM_TUTAR']:.1f} TL")
-                    with col3:
-                        st.metric("Günlük Ort.", f"{row['GUNLUK_ORT_TUKETIM_m3']:.3f} m³")
-                    
-                    st.write(f"**Şüpheli Dönemler:** {row.get('SUPHELI_DONEMLER','Yok')}")
-                    st.write(f"**Davranış Yorumu:** {row.get('DAVRANIS_YORUMU','')}")
-        else:
-            st.info("🎉 Hiç yüksek riskli tesisat bulunamadı!")
+    else:
+        st.info("🤖 AI analiz için veri yükleyin ve incremental learning'i aktif edin")
 
 # Footer
 st.markdown("---")
-st.markdown("💧 Su Tüketim Analiz Sistemi | Streamlit Dashboard | 🧠 River - Online Learning Entegre")
+st.markdown("""
+**🔧 Sistem Mimarisi:** 
+- 🐍 Python + Streamlit 
+- 🧠 River (Incremental ML) 
+- 📁 GitHub Model Storage 
+- ☁️ Streamlit Cloud Deploy
+""")
