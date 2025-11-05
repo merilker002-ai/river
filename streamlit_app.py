@@ -84,16 +84,16 @@ def load_million_plus_data(uploaded_file, sampling_ratio=None):
     return df
 
 def calculate_realistic_consumption(df):
-    """GERÇEKÇİ günlük tüketim hesaplama - KRİTİK DÜZELTME"""
-    # Her okuma bir AY'lık tüketim! Bu yüzden:
-    # Günlük ortalama = Aylık tüketim / 30 gün
+    """GERÇEKÇİ günlük tüketim hesaplama - GRAFİK İÇİN OPTİMİZE"""
     
     # Önce temel periyot (30 gün - standart ay)
     df['OKUMA_PERIYODU_GUN'] = 30
     
     # Tarih farkına göre daha doğru periyot (opsiyonel)
-    mask = df['OKUMA_TARIHI'].notna() & df['ILK_OKUMA_TARIHI'].notna()
-    df.loc[mask, 'OKUMA_PERIYODU_GUN'] = (df.loc[mask, 'OKUMA_TARIHI'] - df.loc[mask, 'ILK_OKUMA_TARIHI']).dt.days
+    if 'OKUMA_TARIHI' in df.columns and 'ILK_OKUMA_TARIHI' in df.columns:
+        mask = df['OKUMA_TARIHI'].notna() & df['ILK_OKUMA_TARIHI'].notna()
+        if mask.any():
+            df.loc[mask, 'OKUMA_PERIYODU_GUN'] = (df.loc[mask, 'OKUMA_TARIHI'] - df.loc[mask, 'ILK_OKUMA_TARIHI']).dt.days
     
     # Gerçekçi periyot sınırları (25-35 gün arası)
     df['OKUMA_PERIYODU_GUN'] = df['OKUMA_PERIYODU_GUN'].clip(lower=25, upper=35)
@@ -109,7 +109,7 @@ def calculate_realistic_consumption(df):
 
 @st.cache_data(ttl=3600)
 def load_and_analyze_data_adaptive(uploaded_file, zone_file):
-    """Adaptive analiz ile veri işleme - 1M+ SATIR DESTEKLİ"""
+    """Adaptive analiz ile veri işleme - GRAFİK DÜZELTMELERİ"""
     try:
         # Büyük veri yükleme
         df = load_million_plus_data(uploaded_file)
@@ -483,43 +483,112 @@ with tab1:
         col1, col2 = st.columns(2)
         
         with col1:
+            # GÜNLÜK TÜKETİM GRAFİĞİ - TAM DÜZELTİLMİŞ
             if 'GUNLUK_ORT_TUKETIM_m3' in son_okumalar.columns:
-                # Boş veri kontrolü
-                if not son_okumalar['GUNLUK_ORT_TUKETIM_m3'].empty:
-                    fig1 = px.histogram(son_okumalar, x='GUNLUK_ORT_TUKETIM_m3', 
-                                      title='Gerçekçi Günlük Tüketim Dağılımı',
-                                      labels={'GUNLUK_ORT_TUKETIM_m3': 'Günlük Tüketim (m³)'})
-                    st.plotly_chart(fig1, use_container_width=True)
+                # NaN değerleri temizle ve geçerli veri kontrolü
+                gunluk_tuketim_data = son_okumalar['GUNLUK_ORT_TUKETIM_m3'].dropna()
+                
+                if len(gunluk_tuketim_data) > 0:
+                    # Aşırı yüksek değerleri filtrele (daha iyi görselleştirme için)
+                    filtered_data = gunluk_tuketim_data[gunluk_tuketim_data <= 20]  # 20 m³/gün'den küçük değerler
+                    
+                    if len(filtered_data) > 0:
+                        fig1 = px.histogram(
+                            filtered_data, 
+                            x=filtered_data.values,
+                            title='Gerçekçi Günlük Tüketim Dağılımı (≤20 m³/gün)',
+                            labels={'x': 'Günlük Tüketim (m³)', 'y': 'Tesisat Sayısı'},
+                            nbins=30,
+                            color_discrete_sequence=['#1f77b4']
+                        )
+                        
+                        # Grafik ayarları
+                        fig1.update_layout(
+                            xaxis_title="Günlük Tüketim (m³)",
+                            yaxis_title="Tesisat Sayısı",
+                            showlegend=False
+                        )
+                        
+                        st.plotly_chart(fig1, use_container_width=True)
+                    else:
+                        # Tüm veriler 20 m³/gün'den büyükse, orijinal veriyi göster
+                        fig1 = px.histogram(
+                            gunluk_tuketim_data,
+                            title='Gerçekçi Günlük Tüketim Dağılımı',
+                            labels={'value': 'Günlük Tüketim (m³)', 'count': 'Tesisat Sayısı'},
+                            nbins=30
+                        )
+                        st.plotly_chart(fig1, use_container_width=True)
                 else:
                     st.info("📊 Günlük tüketim verisi henüz mevcut değil")
+            else:
+                st.info("📊 Günlük tüketim hesaplanamadı - gerekli sütunlar eksik")
         
         with col2:
+            # RİSK DAĞILIM GRAFİĞİ - DÜZELTİLMİŞ
             if 'RISK_SEVIYESI' in son_okumalar.columns:
                 risk_dagilim = son_okumalar['RISK_SEVIYESI'].value_counts()
+                
                 # Pie chart için boş veri kontrolü - KRİTİK DÜZELTME
                 if not risk_dagilim.empty and len(risk_dagilim) > 0:
-                    fig2 = px.pie(values=risk_dagilim.values, names=risk_dagilim.index,
-                                 title='Öğrenilmiş Risk Dağılımı')
+                    # Renk skalası belirle
+                    colors = {'Yüksek': '#FF6B6B', 'Orta': '#FFD93D', 'Düşük': '#6BCF7F'}
+                    
+                    fig2 = px.pie(
+                        values=risk_dagilim.values, 
+                        names=risk_dagilim.index,
+                        title='Öğrenilmiş Risk Dağılımı',
+                        color=risk_dagilim.index,
+                        color_discrete_map=colors
+                    )
+                    
+                    # Grafik ayarları
+                    fig2.update_traces(
+                        textposition='inside',
+                        textinfo='percent+label',
+                        hovertemplate='<b>%{label}</b><br>%{value} tesisat (%{percent})'
+                    )
+                    
                     st.plotly_chart(fig2, use_container_width=True)
                 else:
                     st.info("🎯 Risk analizi henüz mevcut değil")
+            else:
+                st.info("🎯 Risk analizi yapılamadı")
 
 with tab2:
     if zone_analizi is not None and len(zone_analizi) > 0:
         col1, col2 = st.columns(2)
         
         with col1:
-            fig3 = px.pie(zone_analizi, values='TOPLAM_TUKETIM', names='KARNE_NO',
-                        title='Zone Bazlı Tüketim Dağılımı')
-            st.plotly_chart(fig3, use_container_width=True)
+            if 'TOPLAM_TUKETIM' in zone_analizi.columns and 'KARNE_NO' in zone_analizi.columns:
+                fig3 = px.pie(
+                    zone_analizi, 
+                    values='TOPLAM_TUKETIM', 
+                    names='KARNE_NO',
+                    title='Zone Bazlı Tüketim Dağılımı'
+                )
+                st.plotly_chart(fig3, use_container_width=True)
+            else:
+                st.info("📊 Zone tüketim verisi mevcut değil")
         
         with col2:
             st.subheader("Zone Karşılaştırma")
             zone_gosterim = zone_analizi.copy()
+            
+            # Sayısal sütunları formatla
             if 'TOPLAM_TUKETIM' in zone_gosterim.columns:
-                zone_gosterim['TOPLAM_TUKETIM'] = zone_gosterim['TOPLAM_TUKETIM'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "0")
+                zone_gosterim['TOPLAM_TUKETIM'] = zone_gosterim['TOPLAM_TUKETIM'].apply(
+                    lambda x: f"{x:,.0f} m³" if pd.notna(x) else "0 m³"
+                )
             if 'TOPLAM_GELIR' in zone_gosterim.columns:
-                zone_gosterim['TOPLAM_GELIR'] = zone_gosterim['TOPLAM_GELIR'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "0")
+                zone_gosterim['TOPLAM_GELIR'] = zone_gosterim['TOPLAM_GELIR'].apply(
+                    lambda x: f"{x:,.0f} TL" if pd.notna(x) else "0 TL"
+                )
+            if 'TESISAT_SAYISI' in zone_gosterim.columns:
+                zone_gosterim['TESISAT_SAYISI'] = zone_gosterim['TESISAT_SAYISI'].apply(
+                    lambda x: f"{x:,.0f}" if pd.notna(x) else "0"
+                )
+                
             st.dataframe(zone_gosterim, use_container_width=True)
 
 with tab3:
@@ -594,24 +663,25 @@ with tab4:
     with col3:
         st.metric("✅ Başarı Oranı", f"{stats['basari_orani']:.1%}")
     with col4:
-        st.metric("📈 Öğrenme Hızı", f"{stats['ogrenme_hizi']:.1f}")
+        st.metric("📈 Öğrenme Hızı", f"{stats.get('ogrenme_hizi', 0):.1f}")
     
     # Pattern dağılımı
     st.subheader("📊 Öğrenilmiş Pattern Dağılımı")
-    if stats['pattern_dagilimi']:
+    if stats.get('pattern_dagilimi'):
         pattern_df = pd.DataFrame(list(stats['pattern_dagilimi'].items()), columns=['Pattern', 'Sayı'])
         fig_pattern = px.bar(pattern_df, x='Pattern', y='Sayı', title='Öğrenilmiş Pattern Dağılımı')
         st.plotly_chart(fig_pattern, use_container_width=True)
+    else:
+        st.info("📊 Pattern dağılımı henüz mevcut değil")
     
     # Adaptive threshold'lar
     st.subheader("🔧 Adaptive Threshold'lar")
-    threshold_df = pd.DataFrame(list(stats['adaptive_thresholds'].items()), columns=['Threshold', 'Değer'])
-    st.dataframe(threshold_df, use_container_width=True)
-    
-    # Son feedback'ler
-    st.subheader("🔄 Son Geri Bildirimler")
-    if stats['son_feedbackler']:
-        feedback_df = pd.DataFrame(stats['son_feedbackler'])
-        st.dataframe(feedback_df, use_container_width=True)
+    if stats.get('adaptive_thresholds'):
+        threshold_df = pd.DataFrame(list(stats['adaptive_thresholds'].items()), columns=['Threshold', 'Değer'])
+        st.dataframe(threshold_df, use_container_width=True)
     else:
-        st.info("📝 Henüz geri bildirim yok")
+        st.info("🔧 Threshold verisi henüz mevcut değil")
+
+# Footer
+st.markdown("---")
+st.markdown("🚀 **Hemen Öğrenen Su Tüketim AI Sistemi v2.0** | Günlük Tüketim Grafiği Düzeltildi | Optimize Bellek Yönetimi")
