@@ -1,9 +1,10 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import json
-from collections import defaultdict, deque
 import warnings
+from collections import defaultdict, deque
+import re
+
 warnings.filterwarnings('ignore')
 
 class AdaptiveLearningModel:
@@ -23,30 +24,6 @@ class AdaptiveLearningModel:
             'total_observations': 0,
             'real_observations': 0,
             'successful_predictions': 0
-        }
-        
-        # Pattern tanımları
-        self.pattern_definitions = {
-            'sifir_aralikli': {
-                'description': 'Aralıklı sıfır tüketim patterni',
-                'risk_level': 'Yüksek',
-                'features': ['zero_ratio', 'consecutive_zeros']
-            },
-            'yuksek_tuketim': {
-                'description': 'Sürekli yüksek tüketim patterni', 
-                'risk_level': 'Orta',
-                'features': ['mean_consumption', 'variance']
-            },
-            'normal': {
-                'description': 'Normal tüketim patterni',
-                'risk_level': 'Düşük', 
-                'features': ['stability', 'seasonality']
-            },
-            'degisken': {
-                'description': 'Değişken tüketim patterni',
-                'risk_level': 'Orta',
-                'features': ['variance', 'outliers']
-            }
         }
         
         # Sentetik veri ile başlangıç eğitimi
@@ -69,9 +46,6 @@ class AdaptiveLearningModel:
             # Normal pattern (Düşük risk)
             {'zeros_ratio': 0.0, 'variance': 0.2, 'max_consumption': 50, 'risk': 'Düşük'},
             {'zeros_ratio': 0.05, 'variance': 0.15, 'max_consumption': 40, 'risk': 'Düşük'},
-            
-            # Değişken pattern (Orta risk)
-            {'zeros_ratio': 0.2, 'variance': 0.6, 'max_consumption': 90, 'risk': 'Orta'},
         ]
         
         for pattern in synthetic_patterns:
@@ -98,8 +72,6 @@ class AdaptiveLearningModel:
             return 'sifir_aralikli'
         elif features['max_consumption'] > 80:
             return 'yuksek_tuketim'
-        elif features['variance'] > 0.5:
-            return 'degisken'
         else:
             return 'normal'
     
@@ -112,10 +84,9 @@ class AdaptiveLearningModel:
         try:
             # Temel istatistikler
             tuketimler = tesisat_verisi['AKTIF_m3'].values
-            dates = pd.to_datetime(tesisat_verisi['OKUMA_TARIHI'])
             
             # Pattern özellikleri çıkarımı
-            features = self._extract_pattern_features(tuketimler, dates)
+            features = self._extract_pattern_features(tuketimler)
             
             # Risk değerlendirmesi
             risk_analysis = self._assess_risk_with_learning(features)
@@ -135,7 +106,7 @@ class AdaptiveLearningModel:
             print(f"Analiz hatası: {e}")
             return self._default_analysis()
     
-    def _extract_pattern_features(self, tuketimler, dates):
+    def _extract_pattern_features(self, tuketimler):
         """Pattern özelliklerini çıkar"""
         
         # Temel istatistikler
@@ -149,13 +120,6 @@ class AdaptiveLearningModel:
         # Varyans analizi
         variance = std_tuketim / (mean_tuketim + 1e-8)  # Sıfıra bölünmeyi önle
         
-        # Zaman serisi özellikleri
-        if len(tuketimler) > 1:
-            trends = np.diff(tuketimler)
-            trend_strength = np.mean(np.abs(trends)) / (mean_tuketim + 1e-8)
-        else:
-            trend_strength = 0
-        
         # Pattern sınıflandırma
         pattern_type = self._classify_consumption_pattern(zero_ratio, variance, max_tuketim)
         
@@ -164,7 +128,6 @@ class AdaptiveLearningModel:
             'variance': variance,
             'mean_consumption': mean_tuketim,
             'max_consumption': max_tuketim,
-            'trend_strength': trend_strength,
             'pattern_type': pattern_type,
             'data_points': len(tuketimler)
         }
@@ -181,8 +144,6 @@ class AdaptiveLearningModel:
             return 'sifir_aralikli'
         elif max_consumption > high_threshold:
             return 'yuksek_tuketim'
-        elif variance > var_threshold:
-            return 'degisken'
         else:
             return 'normal'
     
@@ -193,7 +154,6 @@ class AdaptiveLearningModel:
         pattern_risk_weights = {
             'sifir_aralikli': 0.9,
             'yuksek_tuketim': 0.7, 
-            'degisken': 0.6,
             'normal': 0.2
         }
         
@@ -210,26 +170,21 @@ class AdaptiveLearningModel:
         elif features['variance'] > 0.5:
             base_risk += 0.1
         
-        # Öğrenilmiş pattern başarı oranları
-        success_rate = self.learning_data['success_rates'].get(features['pattern_type'], 0.7)
-        confidence_adjustment = (1 - success_rate) * 0.3  # Düşük başarı → daha yüksek risk
-        base_risk += confidence_adjustment
-        
         # Risk seviyesi belirleme
         base_risk = max(0.1, min(0.95, base_risk))
         
         if base_risk > 0.7:
             risk_seviyesi = "Yüksek"
             risk_puan = 4
-            yorum = self._generate_risk_comment(features, "Yüksek")
+            yorum = f"🚨 {features['pattern_type']} patterni - Acil inceleme gerekli"
         elif base_risk > 0.4:
             risk_seviyesi = "Orta" 
             risk_puan = 2
-            yorum = self._generate_risk_comment(features, "Orta")
+            yorum = f"📊 {features['pattern_type']} patterni - İzleme gerektirir"
         else:
             risk_seviyesi = "Düşük"
             risk_puan = 1
-            yorum = self._generate_risk_comment(features, "Düşük")
+            yorum = f"✅ {features['pattern_type']} patterni - Düşük risk"
         
         # Şüpheli dönemler
         supheli_donemler = self._identify_suspicious_periods(features)
@@ -240,39 +195,6 @@ class AdaptiveLearningModel:
             'yorum': yorum,
             'supheli_donemler': supheli_donemler
         }
-    
-    def _generate_risk_comment(self, features, risk_level):
-        """Risk seviyesine göre yorum oluştur"""
-        
-        pattern_names = {
-            'sifir_aralikli': 'Aralıklı sıfır tüketim',
-            'yuksek_tuketim': 'Yüksek tüketim',
-            'degisken': 'Değişken tüketim',
-            'normal': 'Normal tüketim'
-        }
-        
-        pattern_desc = pattern_names.get(features['pattern_type'], 'Bilinmeyen pattern')
-        
-        comments = {
-            'Yüksek': [
-                f"🚨 {pattern_desc} tespit edildi. Acil inceleme önerilir.",
-                f"⚠️ Yüksek riskli {pattern_desc} patterni. Detaylı kontrol gerekli.",
-                f"🔴 {pattern_desc} nedeniyle yüksek risk seviyesi."
-            ],
-            'Orta': [
-                f"📊 {pattern_desc} gözlemlendi. Periyodik takip önerilir.", 
-                f"🟡 Orta riskli {pattern_desc} patterni. Gözlem altında tutulmalı.",
-                f"📈 {pattern_desc} nedeniyle orta risk seviyesi."
-            ],
-            'Düşük': [
-                f"✅ {pattern_desc} patterni. Düşük risk seviyesi.",
-                f"🟢 Normal {pattern_desc} davranışı. Risk seviyesi düşük.",
-                f"👍 {pattern_desc} nedeniyle düşük risk seviyesi."
-            ]
-        }
-        
-        import random
-        return random.choice(comments[risk_level])
     
     def _identify_suspicious_periods(self, features):
         """Şüpheli dönemleri belirle"""
@@ -298,10 +220,7 @@ class AdaptiveLearningModel:
         
         # Pattern sayısını güncelle
         pattern_type = features['pattern_type']
-        self.learning_data['pattern_counts'][pattern_type] += 1
-        
-        # Risk pattern'ini kaydet
-        self.learning_data['risk_patterns'][actual_risk].append(features)
+        self.learning_data['pattern_counts'][actual_risk] += 1
         
         # Gözlem sayılarını güncelle
         self.learning_data['total_observations'] += 1
@@ -312,34 +231,6 @@ class AdaptiveLearningModel:
             self.learning_data['successful_predictions'] += 1
         elif actual_risk == 'Düşük' and features['pattern_type'] == 'normal':
             self.learning_data['successful_predictions'] += 1
-        
-        # Adaptive threshold'ları güncelle
-        self._update_adaptive_thresholds()
-    
-    def _update_adaptive_thresholds(self):
-        """Adaptive threshold'ları güncelle"""
-        
-        # Mevcut pattern dağılımına göre threshold'ları ayarla
-        total_patterns = sum(self.learning_data['pattern_counts'].values())
-        
-        if total_patterns > 0:
-            zero_pattern_ratio = self.learning_data['pattern_counts']['sifir_aralikli'] / total_patterns
-            high_pattern_ratio = self.learning_data['pattern_counts']['yuksek_tuketim'] / total_patterns
-            
-            # Zero consumption threshold - daha fazla sıfır pattern varsa threshold'u düşür
-            new_zero_threshold = max(0.1, min(0.5, 0.3 - (zero_pattern_ratio - 0.2)))
-            
-            # High consumption threshold  
-            new_high_threshold = max(30, min(100, 50 + (high_pattern_ratio - 0.3) * 50))
-            
-            # Variance threshold
-            new_var_threshold = max(0.2, min(0.8, 0.4 + (zero_pattern_ratio - 0.2)))
-            
-            self.learning_data['adaptive_thresholds'].update({
-                'zero_consumption': new_zero_threshold,
-                'high_consumption': new_high_threshold, 
-                'variance_threshold': new_var_threshold
-            })
     
     def learn_from_feedback(self, tesisat_no, gercek_risk, tahmin_risk, metadata=None):
         """Geri bildirimden öğrenme"""
@@ -359,18 +250,6 @@ class AdaptiveLearningModel:
             self.learning_data['successful_predictions'] += 1
         
         self.learning_data['total_observations'] += 1
-        
-        # Pattern başarı oranlarını güncelle
-        if 'pattern_type' in metadata:
-            pattern_type = metadata['pattern_type']
-            current_success = self.learning_data['success_rates'].get(pattern_type, 0.7)
-            
-            if gercek_risk == tahmin_risk:
-                new_success = current_success * 0.95 + 0.05  # Artan başarı
-            else:
-                new_success = current_success * 0.98 - 0.02  # Azalan başarı
-            
-            self.learning_data['success_rates'][pattern_type] = max(0.1, min(0.95, new_success))
     
     def get_learning_stats(self):
         """Öğrenme istatistiklerini getir"""
@@ -384,17 +263,13 @@ class AdaptiveLearningModel:
         # Pattern dağılımı
         pattern_dagilimi = dict(self.learning_data['pattern_counts'])
         
-        # Son feedback'ler
-        son_feedbackler = list(self.learning_data['feedback_history'])[-10:]  # Son 10 feedback
-        
         return {
             'toplam_gozlem': total_obs,
             'gercek_gozlem': real_obs,
             'basari_orani': basari_orani,
             'ogrenme_hizi': real_obs / max(1, total_obs - real_obs),
             'pattern_dagilimi': pattern_dagilimi,
-            'adaptive_thresholds': self.learning_data['adaptive_thresholds'],
-            'son_feedbackler': son_feedbackler
+            'adaptive_thresholds': self.learning_data['adaptive_thresholds']
         }
     
     def _default_analysis(self):
