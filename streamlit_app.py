@@ -380,21 +380,47 @@ if st.sidebar.button("🎮 Gelişmiş Demo Modu"):
     # Son okumaları al
     son_okumalar = df_detayli.sort_values('OKUMA_TARIHI').groupby('TESISAT_NO').last().reset_index()
     
-    # Adaptive analiz - ÖĞRENME ENTEGRE
+    # DEMO İÇİN BASİT RİSK ANALİZİ - PİE CHART HATASI DÜZELTİLMİŞ
     davranis_sonuclari = []
+    success_count = 0
+
     for tesisat_no in son_okumalar['TESISAT_NO'].unique():
         tesisat_verisi = df_detayli[df_detayli['TESISAT_NO'] == tesisat_no].sort_values('OKUMA_TARIHI')
-        analiz_sonucu = adaptive_model.gelismis_davranis_analizi(tesisat_verisi)
         
-        davranis_sonuclari.append({
-            'TESISAT_NO': tesisat_no,
-            'DAVRANIS_YORUMU': analiz_sonucu['yorum'],
-            'SUPHEli_DONEMLER': analiz_sonucu['supheli_donemler'],
-            'RISK_SEVIYESI': analiz_sonucu['risk_seviyesi'],
-            'RISK_PUANI': analiz_sonucu['risk_puan'],
-            'PATTERN_DATA': analiz_sonucu.get('pattern_data', {})
-        })
-    
+        # Demo için basit risk hesaplama (AI olmadan)
+        tuketimler = tesisat_verisi['AKTIF_m3'].values
+        
+        if len(tuketimler) >= 3:
+            sifir_sayisi = sum(tuketimler == 0)
+            mean_tuketim = np.mean(tuketimler)
+            
+            # Basit risk belirleme
+            if sifir_sayisi >= 2 or mean_tuketim > 50:
+                risk_seviyesi = "Yüksek"
+            elif sifir_sayisi == 1 or mean_tuketim > 30:
+                risk_seviyesi = "Orta"
+            else:
+                risk_seviyesi = "Düşük"
+            
+            # Yorum oluştur
+            if risk_seviyesi == "Yüksek":
+                yorum = "Demo: Yüksek risk pattern"
+            elif risk_seviyesi == "Orta":
+                yorum = "Demo: Orta risk pattern" 
+            else:
+                yorum = "Demo: Düşük risk pattern"
+            
+            davranis_sonuclari.append({
+                'TESISAT_NO': tesisat_no,
+                'DAVRANIS_YORUMU': yorum,
+                'SUPHELI_DONEMLER': "Yok",
+                'RISK_SEVIYESI': risk_seviyesi,
+                'RISK_PUANI': 4 if risk_seviyesi == "Yüksek" else 2 if risk_seviyesi == "Orta" else 1,
+                'PATTERN_DATA': {}
+            })
+            
+            success_count += 1
+
     davranis_df = pd.DataFrame(davranis_sonuclari)
     son_okumalar = son_okumalar.merge(davranis_df, on='TESISAT_NO', how='left')
     
@@ -410,7 +436,7 @@ if st.sidebar.button("🎮 Gelişmiş Demo Modu"):
         'ZONE2': {'ad': 'BÖLGE-2', 'verilen_su': 8000, 'tahakkuk_m3': 6000, 'kayip_oran': 25.0},
     }
     
-    st.success("✅ Gelişmiş demo verisi oluşturuldu! AI analiz ediyor ve ÖĞRENİYOR.")
+    st.success(f"✅ Gelişmiş demo verisi oluşturuldu! {success_count} tesisat analiz edildi.")
 
 elif uploaded_file is not None:
     try:
@@ -568,93 +594,24 @@ with tab4:
     with col3:
         st.metric("✅ Başarı Oranı", f"{stats['basari_orani']:.1%}")
     with col4:
-        st.metric("🔢 Model Versiyon", stats['model_version'])
+        st.metric("📈 Öğrenme Hızı", f"{stats['ogrenme_hizi']:.1f}")
     
-    # Öğrenme durumu - DÜZELTİLMİŞ
-    st.subheader("📊 Öğrenme İlerlemesi")
+    # Pattern dağılımı
+    st.subheader("📊 Öğrenilmiş Pattern Dağılımı")
+    if stats['pattern_dagilimi']:
+        pattern_df = pd.DataFrame(list(stats['pattern_dagilimi'].items()), columns=['Pattern', 'Sayı'])
+        fig_pattern = px.bar(pattern_df, x='Pattern', y='Sayı', title='Öğrenilmiş Pattern Dağılımı')
+        st.plotly_chart(fig_pattern, use_container_width=True)
     
-    progress_col1, progress_col2 = st.columns(2)
+    # Adaptive threshold'lar
+    st.subheader("🔧 Adaptive Threshold'lar")
+    threshold_df = pd.DataFrame(list(stats['adaptive_thresholds'].items()), columns=['Threshold', 'Değer'])
+    st.dataframe(threshold_df, use_container_width=True)
     
-    with progress_col1:
-        # Gözlem ilerlemesi - DÜZELTİLMİŞ
-        total_obs = stats['toplam_gozlem']
-        max_obs = 10000
-        obs_progress = min(total_obs / max_obs, 1.0)
-        st.progress(obs_progress)
-        st.write(f"**Gözlem İlerlemesi:** {total_obs:,} / {max_obs:,}")
-    
-    with progress_col2:
-        # Başarı ilerlemesi - DÜZELTİLMİŞ
-        success_rate = stats['basari_orani']
-        st.progress(success_rate)
-        st.write(f"**Başarı Oranı:** {success_rate:.1%}")
-    
-    # Adaptive threshold grafiği - BASİTLEŞTİRİLMİŞ
-    st.subheader("🔧 Adaptive Threshold Değerleri")
-    
-    thresholds = stats['adaptive_thresholds']
-    
-    # Tablo formatında göster
-    threshold_data = []
-    for key, value in thresholds.items():
-        threshold_data.append({
-            'Threshold': key,
-            'Değer': f"{value:.2f}"
-        })
-    
-    threshold_df = pd.DataFrame(threshold_data)
-    st.dataframe(threshold_df, use_container_width=True, hide_index=True)
-    
-    # Basit grafik
-    fig = px.bar(threshold_df, x='Threshold', y='Değer', 
-                 title='Adaptive Threshold Değerleri',
-                 labels={'Değer': 'Threshold Değeri'})
-    fig.update_traces(texttemplate='%{y:.2f}', textposition='outside')
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # AI Önerileri - NETLEŞTİRİLMİŞ
-    st.subheader("🚀 AI Önerileri & Sonraki Adımlar")
-    
-    if stats['toplam_gozlem'] < 50:
-        st.info("""
-        **🎯 Öneri:** AI henüz yeni başladı! 
-        - Demo modda birkaç analiz yapın
-        - Hızlı geri bildirim butonlarını kullanın  
-        - 50+ gözlem sonrası daha akıllı hale gelecek
-        """)
-    elif stats['basari_orani'] < 0.7:
-        st.warning("""
-        **⚠️ Geliştirme Gerekli:** Başarı oranı düşük!
-        - Daha fazla geri bildirim toplayın
-        - Threshold'ları manuel ayarlamayı düşünün
-        - Farklı pattern'ler için feedback verin
-        """)
+    # Son feedback'ler
+    st.subheader("🔄 Son Geri Bildirimler")
+    if stats['son_feedbackler']:
+        feedback_df = pd.DataFrame(stats['son_feedbackler'])
+        st.dataframe(feedback_df, use_container_width=True)
     else:
-        st.success("""
-        **✅ Mükemmel Performans:** AI iyi öğreniyor!
-        - Mevcut ayarları koruyun
-        - Yeni pattern'ler için feedback vermeye devam edin
-        - Modeli düzenli olarak kaydedin
-        """)
-    
-    # Pattern hafızası - NET GÖSTERİM
-    if stats['pattern_memory_size'] > 0:
-        st.subheader("🧠 Pattern Hafızası")
-        st.info(f"AI **{stats['pattern_memory_size']}** farklı pattern'i hafızasında tutuyor!")
-    
-    # EK: Model durumu
-    st.subheader("🔍 Model Durumu")
-    status_col1, status_col2 = st.columns(2)
-    
-    with status_col1:
-        st.write(f"**Durum:** {stats['status']}")
-        st.write(f"**Son Güncelleme:** {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-    
-    with status_col2:
-        st.write(f"**Gerçek Başarı Oranı:** {stats.get('gercek_basari_orani', 0):.1%}")
-        st.write(f"**Pattern Bellek Kullanımı:** {stats['pattern_memory_size']} / 5,000")
-
-# Footer
-st.markdown("---")
-st.markdown("🚀 **Hemen Öğrenen Su Tüketim AI Sistemi v2.0** | 1M+ Satır Desteği | Optimize Bellek Yönetimi")
-
+        st.info("📝 Henüz geri bildirim yok")
