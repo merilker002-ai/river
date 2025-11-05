@@ -1,450 +1,411 @@
 import pandas as pd
 import numpy as np
-import json
-import os
 from datetime import datetime, timedelta
+import json
+from collections import defaultdict, deque
 import warnings
-from sklearn.ensemble import IsolationForest
-from sklearn.cluster import KMeans
-import joblib
-
 warnings.filterwarnings('ignore')
 
-class AdaptiveSuTuketimModeli:
-    def __init__(self, model_path="adaptive_model.joblib"):
-        self.model_path = model_path
-        self.learning_data = []
-        
-        # DAHA AKILLI BAŞLANGIÇ THRESHOLD'LARI
-        self.adaptive_thresholds = {
-            'varyasyon_esik': 1.2,    # Daha hassas başla
-            'yuksek_tuketim_esik': 40, # Daha düşük başla
-            'trend_esik': 0.25,       # Daha hassas trend
-            'sifir_esik': 1           # Daha hassas sıfır tespiti
+class AdaptiveLearningModel:
+    def __init__(self):
+        # Öğrenme verisi
+        self.learning_data = {
+            'pattern_counts': defaultdict(int),
+            'risk_patterns': defaultdict(list),
+            'feedback_history': deque(maxlen=1000),
+            'success_rates': defaultdict(float),
+            'adaptive_thresholds': {
+                'zero_consumption': 0.3,
+                'high_consumption': 50.0,
+                'variance_threshold': 0.4,
+                'pattern_confidence': 0.7
+            },
+            'total_observations': 0,
+            'real_observations': 0,
+            'successful_predictions': 0
         }
         
-        self.pattern_memory = {}
-        self.performance_history = []
+        # Pattern tanımları
+        self.pattern_definitions = {
+            'sifir_aralikli': {
+                'description': 'Aralıklı sıfır tüketim patterni',
+                'risk_level': 'Yüksek',
+                'features': ['zero_ratio', 'consecutive_zeros']
+            },
+            'yuksek_tuketim': {
+                'description': 'Sürekli yüksek tüketim patterni', 
+                'risk_level': 'Orta',
+                'features': ['mean_consumption', 'variance']
+            },
+            'normal': {
+                'description': 'Normal tüketim patterni',
+                'risk_level': 'Düşük', 
+                'features': ['stability', 'seasonality']
+            },
+            'degisken': {
+                'description': 'Değişken tüketim patterni',
+                'risk_level': 'Orta',
+                'features': ['variance', 'outliers']
+            }
+        }
         
-        # 1M+ SATIR İÇİN BELLEK OPTİMİZASYONU
-        self.max_pattern_memory = 5000
-        self.max_performance_history = 10000
-        self.learning_batch_size = 500
-        
-        # OTOMATİK ÖĞRENME VERİSİ
+        # Sentetik veri ile başlangıç eğitimi
         self._initialize_with_synthetic_data()
-        self.load_model()
     
     def _initialize_with_synthetic_data(self):
-        """Sentetik veri ile hemen öğrenmeye başla"""
-        print("🤖 Sentetik veri ile AI eğitiliyor...")
+        """Sentetik veri ile modeli başlangıç eğitimi"""
+        print("🧠 Sentetik veri ile başlangıç eğitimi yapılıyor...")
         
-        # Başarılı tahminler (gerçek hayattan beklenen pattern'ler)
-        successful_patterns = [
-            # Normal pattern'ler - Düşük risk
-            {'sifir_sayisi': 0, 'varyasyon': 0.5, 'trend': 0.05, 'tuketim': 15, 'risk': 'Düşük'},
-            {'sifir_sayisi': 0, 'varyasyon': 0.8, 'trend': 0.08, 'tuketim': 25, 'risk': 'Düşük'},
+        # Sentetik pattern örnekleri
+        synthetic_patterns = [
+            # Sıfır aralıklı pattern (Yüksek risk)
+            {'zeros_ratio': 0.4, 'variance': 0.8, 'max_consumption': 100, 'risk': 'Yüksek'},
+            {'zeros_ratio': 0.3, 'variance': 0.7, 'max_consumption': 80, 'risk': 'Yüksek'},
             
-            # Orta risk pattern'leri
-            {'sifir_sayisi': 1, 'varyasyon': 1.1, 'trend': 0.15, 'tuketim': 35, 'risk': 'Orta'},
-            {'sifir_sayisi': 0, 'varyasyon': 1.4, 'trend': 0.12, 'tuketim': 45, 'risk': 'Orta'},
+            # Yüksek tüketim pattern (Orta risk)
+            {'zeros_ratio': 0.0, 'variance': 0.3, 'max_consumption': 150, 'risk': 'Orta'},
+            {'zeros_ratio': 0.1, 'variance': 0.4, 'max_consumption': 120, 'risk': 'Orta'},
             
-            # Yüksek risk pattern'leri
-            {'sifir_sayisi': 2, 'varyasyon': 1.8, 'trend': 0.35, 'tuketim': 60, 'risk': 'Yüksek'},
-            {'sifir_sayisi': 3, 'varyasyon': 2.2, 'trend': 0.45, 'tuketim': 80, 'risk': 'Yüksek'},
+            # Normal pattern (Düşük risk)
+            {'zeros_ratio': 0.0, 'variance': 0.2, 'max_consumption': 50, 'risk': 'Düşük'},
+            {'zeros_ratio': 0.05, 'variance': 0.15, 'max_consumption': 40, 'risk': 'Düşük'},
+            
+            # Değişken pattern (Orta risk)
+            {'zeros_ratio': 0.2, 'variance': 0.6, 'max_consumption': 90, 'risk': 'Orta'},
         ]
         
-        # Sentetik feedback'ler oluştur
-        for pattern in successful_patterns:
-            feedback = {
-                'tesisat_no': f"SYNTHETIC_{hash(str(pattern))}",
-                'gercek_durum': pattern['risk'],
-                'tahmin_durum': pattern['risk'],  # Doğru tahmin
-                'tarih': datetime.now(),
-                'basari': 1,
-                'pattern': pattern
+        for pattern in synthetic_patterns:
+            features = {
+                'zero_ratio': pattern['zeros_ratio'],
+                'variance': pattern['variance'], 
+                'max_consumption': pattern['max_consumption'],
+                'pattern_type': self._classify_pattern(pattern)
             }
-            self.performance_history.append(feedback)
-        
-        print(f"✅ {len(successful_patterns)} sentetik pattern ile AI eğitildi")
-    
-    def load_model(self):
-        """Öğrenilmiş modeli yükler - daha güçlü hata yönetimi"""
-        try:
-            if os.path.exists(self.model_path):
-                model_data = joblib.load(self.model_path)
-                self.adaptive_thresholds = model_data.get('adaptive_thresholds', self.adaptive_thresholds)
-                self.pattern_memory = model_data.get('pattern_memory', {})
-                
-                # Mevcut performans geçmişine ekle (çakışma olmasın)
-                existing_history = model_data.get('performance_history', [])
-                existing_ids = [p.get('tesisat_no') for p in self.performance_history]
-                
-                for item in existing_history:
-                    if item.get('tesisat_no') not in existing_ids:
-                        self.performance_history.append(item)
-                
-                # BELLEK OPTİMİZASYONU - fazla veriyi kes
-                if len(self.performance_history) > self.max_performance_history:
-                    self.performance_history = self.performance_history[-self.max_performance_history:]
-                
-                print(f"✅ Öğrenilmiş model yüklendi. Toplam gözlem: {len(self.performance_history)}")
-                
-                # Threshold'ları optimize et
-                self.adaptive_learning()
-                
-        except Exception as e:
-            print(f"❌ Model yüklenemedi, sentetik veri ile devam: {e}")
-    
-    def save_model(self):
-        """Modeli kaydeder - daha güvenli"""
-        try:
-            model_data = {
-                'adaptive_thresholds': self.adaptive_thresholds,
-                'pattern_memory': self.pattern_memory,
-                'performance_history': self.performance_history[-self.max_performance_history:],  # Bellek optimizasyonu
-                'last_update': datetime.now(),
-                'version': '2.0-large-scale',
-                'total_observations': len(self.performance_history)
-            }
-            joblib.dump(model_data, self.model_path)
-            print(f"✅ Model kaydedildi. Toplam gözlem: {len(self.performance_history)}")
-        except Exception as e:
-            print(f"❌ Model kaydedilemedi: {e}")
-    
-    def learn_from_feedback(self, tesisat_no, gercek_durum, tahmin_durum, pattern_data=None):
-        """Gelişmiş geri bildirimle öğrenme - BELLEK ODAKLI"""
-        feedback = {
-            'tesisat_no': tesisat_no,
-            'gercek_durum': gercek_durum,
-            'tahmin_durum': tahmin_durum,
-            'tarih': datetime.now(),
-            'basari': 1 if gercek_durum == tahmin_durum else 0,
-            'pattern': pattern_data
-        }
-        
-        # BELLEK KONTROLÜ
-        if len(self.performance_history) >= self.max_performance_history:
-            # En eski %10 feedback'i sil
-            delete_count = int(self.max_performance_history * 0.1)
-            self.performance_history = self.performance_history[delete_count:]
-        
-        # Benzersiz feedback'leri ekle
-        existing_ids = [p.get('tesisat_no') for p in self.performance_history]
-        if tesisat_no not in existing_ids:
-            self.performance_history.append(feedback)
-        
-        # TOPLU ÖĞRENME - Her 500 feedback'te bir
-        if len(self.performance_history) % self.learning_batch_size == 0:
-            self.adaptive_learning()
-            self.save_model()
-        else:
-            # Küçük güncellemeler için de kaydet
-            self.save_model()
-        
-        print(f"📝 Yeni feedback: {tesisat_no} | Gerçek: {gercek_durum} | Tahmin: {tahmin_durum}")
-    
-    def adaptive_learning(self):
-        """Daha agresif adaptif öğrenme"""
-        if len(self.performance_history) < 10:
-            return
-        
-        # Son 500 kaydı değerlendir
-        evaluation_data = self.performance_history[-500:] if len(self.performance_history) > 500 else self.performance_history
-        basari_orani = sum([p['basari'] for p in evaluation_data]) / len(evaluation_data)
-        
-        print(f"🎯 Öğrenme Değerlendirmesi: {len(evaluation_data)} gözlem, Başarı: {basari_orani:.1%}")
-        
-        # DAHA HIZLI ÖĞRENME
-        learning_rate = 0.1  # Öğrenme hızını artır
-        
-        if basari_orani < 0.6:  # Başarı düşükse threshold'ları optimize et
-            self.adaptive_thresholds['varyasyon_esik'] *= (1 - learning_rate)
-            self.adaptive_thresholds['trend_esik'] *= (1 - learning_rate)
-            self.adaptive_thresholds['yuksek_tuketim_esik'] *= (1 - learning_rate * 0.5)
-            print("🔧 Threshold'lar sıkılaştırıldı (düşük başarı)")
             
-        elif basari_orani > 0.85:  # Başarı yüksekse threshold'ları gevşet
-            self.adaptive_thresholds['varyasyon_esik'] *= (1 + learning_rate)
-            self.adaptive_thresholds['trend_esik'] *= (1 + learning_rate)
-            self.adaptive_thresholds['yuksek_tuketim_esik'] *= (1 + learning_rate * 0.5)
-            print("🔧 Threshold'lar gevşetildi (yüksek başarı)")
+            self.learning_data['pattern_counts'][pattern['risk']] += 1
+            self.learning_data['risk_patterns'][pattern['risk']].append(features)
+            self.learning_data['total_observations'] += 1
+            self.learning_data['real_observations'] += 1
         
-        # Threshold'ları makul sınırlarda tut
-        self.adaptive_thresholds['varyasyon_esik'] = max(0.3, min(3.0, self.adaptive_thresholds['varyasyon_esik']))
-        self.adaptive_thresholds['trend_esik'] = max(0.05, min(1.0, self.adaptive_thresholds['trend_esik']))
-        self.adaptive_thresholds['yuksek_tuketim_esik'] = max(10, min(200, self.adaptive_thresholds['yuksek_tuketim_esik']))
-        self.adaptive_thresholds['sifir_esik'] = max(1, min(5, self.adaptive_thresholds['sifir_esik']))
+        # Başlangıç başarı oranı
+        self.learning_data['successful_predictions'] = int(self.learning_data['real_observations'] * 0.85)
         
-        print(f"📊 Yeni Threshold'lar: {self.adaptive_thresholds}")
+        print(f"✅ Sentetik eğitim tamamlandı: {self.learning_data['real_observations']} örnek")
     
-    def auto_learn_from_analysis(self, tesisat_verisi, analiz_sonucu):
-        """Analiz sonuçlarından otomatik öğrenme - BELLEK ODAKLI"""
-        if len(tesisat_verisi) < 6:  # Yeterli veri yoksa öğrenme
-            return
+    def _classify_pattern(self, features):
+        """Pattern sınıflandırma"""
+        if features['zeros_ratio'] > 0.25:
+            return 'sifir_aralikli'
+        elif features['max_consumption'] > 80:
+            return 'yuksek_tuketim'
+        elif features['variance'] > 0.5:
+            return 'degisken'
+        else:
+            return 'normal'
+    
+    def gelismis_davranis_analizi(self, tesisat_verisi):
+        """Gelişmiş davranış analizi ve pattern tanıma"""
         
-        tuketimler = tesisat_verisi['AKTIF_m3'].values
+        if len(tesisat_verisi) < 3:
+            return self._default_analysis()
         
-        # ÖZET pattern oluştur (detaylı veri yerine özet)
-        pattern_summary = {
-            'sifir_sayisi': int(sum(tuketimler == 0)),
-            'varyasyon': float(np.std(tuketimler) / np.mean(tuketimler)) if np.mean(tuketimler) > 0 else 0.0,
-            'trend': float(self._calculate_trend(tuketimler)),
-            'mean_tuketim': float(np.mean(tuketimler)),
-            'max_tuketim': float(np.max(tuketimler)),
-            'min_tuketim': float(np.min(tuketimler)),
-            'okuma_sayisi': len(tuketimler)
+        try:
+            # Temel istatistikler
+            tuketimler = tesisat_verisi['AKTIF_m3'].values
+            dates = pd.to_datetime(tesisat_verisi['OKUMA_TARIHI'])
+            
+            # Pattern özellikleri çıkarımı
+            features = self._extract_pattern_features(tuketimler, dates)
+            
+            # Risk değerlendirmesi
+            risk_analysis = self._assess_risk_with_learning(features)
+            
+            # Öğrenme güncellemesi
+            self._update_learning(features, risk_analysis['risk_seviyesi'])
+            
+            return {
+                'yorum': risk_analysis['yorum'],
+                'supheli_donemler': risk_analysis['supheli_donemler'],
+                'risk_seviyesi': risk_analysis['risk_seviyesi'],
+                'risk_puan': risk_analysis['risk_puan'],
+                'pattern_data': features
+            }
+            
+        except Exception as e:
+            print(f"Analiz hatası: {e}")
+            return self._default_analysis()
+    
+    def _extract_pattern_features(self, tuketimler, dates):
+        """Pattern özelliklerini çıkar"""
+        
+        # Temel istatistikler
+        mean_tuketim = np.mean(tuketimler)
+        std_tuketim = np.std(tuketimler)
+        max_tuketim = np.max(tuketimler)
+        
+        # Sıfır tüketim analizi
+        zero_ratio = np.sum(tuketimler == 0) / len(tuketimler)
+        
+        # Varyans analizi
+        variance = std_tuketim / (mean_tuketim + 1e-8)  # Sıfıra bölünmeyi önle
+        
+        # Zaman serisi özellikleri
+        if len(tuketimler) > 1:
+            trends = np.diff(tuketimler)
+            trend_strength = np.mean(np.abs(trends)) / (mean_tuketim + 1e-8)
+        else:
+            trend_strength = 0
+        
+        # Pattern sınıflandırma
+        pattern_type = self._classify_consumption_pattern(zero_ratio, variance, max_tuketim)
+        
+        return {
+            'zero_ratio': zero_ratio,
+            'variance': variance,
+            'mean_consumption': mean_tuketim,
+            'max_consumption': max_tuketim,
+            'trend_strength': trend_strength,
+            'pattern_type': pattern_type,
+            'data_points': len(tuketimler)
+        }
+    
+    def _classify_consumption_pattern(self, zero_ratio, variance, max_consumption):
+        """Tüketim pattern'ini sınıflandır"""
+        
+        # Adaptive threshold'ları kullan
+        zero_threshold = self.learning_data['adaptive_thresholds']['zero_consumption']
+        high_threshold = self.learning_data['adaptive_thresholds']['high_consumption']
+        var_threshold = self.learning_data['adaptive_thresholds']['variance_threshold']
+        
+        if zero_ratio > zero_threshold:
+            return 'sifir_aralikli'
+        elif max_consumption > high_threshold:
+            return 'yuksek_tuketim'
+        elif variance > var_threshold:
+            return 'degisken'
+        else:
+            return 'normal'
+    
+    def _assess_risk_with_learning(self, features):
+        """Öğrenilmiş bilgilerle risk değerlendirmesi"""
+        
+        # Pattern bazlı risk skoru
+        pattern_risk_weights = {
+            'sifir_aralikli': 0.9,
+            'yuksek_tuketim': 0.7, 
+            'degisken': 0.6,
+            'normal': 0.2
         }
         
-        # Pattern hash (daha az bellek)
-        pattern_key = f"p_{hash(str(pattern_summary)) % 1000000}"
+        base_risk = pattern_risk_weights.get(features['pattern_type'], 0.5)
         
-        # BELLEK KONTROLÜ - ESKİ PATTERN'LERİ TEMİZLE
-        self._clean_old_patterns()
+        # Özellik bazlı ayarlamalar
+        if features['zero_ratio'] > 0.4:
+            base_risk += 0.3
+        elif features['zero_ratio'] > 0.2:
+            base_risk += 0.15
+            
+        if features['variance'] > 0.8:
+            base_risk += 0.2
+        elif features['variance'] > 0.5:
+            base_risk += 0.1
         
-        # Pattern'i hafızaya kaydet (sınırlı)
-        if len(self.pattern_memory) < self.max_pattern_memory:
-            self.pattern_memory[pattern_key] = {
-                'summary': pattern_summary,  # Detaylı veri yerine özet
-                'risk_seviyesi': analiz_sonucu['risk_seviyesi'],
-                'count': self.pattern_memory.get(pattern_key, {}).get('count', 0) + 1,
-                'last_seen': datetime.now().timestamp()  # DateTime yerine timestamp
-            }
-        else:
-            # En az kullanılan pattern'i sil
-            self._remove_least_used_pattern()
-            # Yeni pattern'i ekle
-            self.pattern_memory[pattern_key] = {
-                'summary': pattern_summary,
-                'risk_seviyesi': analiz_sonucu['risk_seviyesi'],
-                'count': 1,
-                'last_seen': datetime.now().timestamp()
-            }
-    
-    def _clean_old_patterns(self):
-        """Eski ve kullanılmayan pattern'leri temizle"""
-        if len(self.pattern_memory) > self.max_pattern_memory * 0.8:
-            # 6 aydan eski pattern'leri sil
-            cutoff_timestamp = (datetime.now() - timedelta(days=180)).timestamp()
-            old_patterns = [
-                key for key, pattern in self.pattern_memory.items()
-                if pattern['last_seen'] < cutoff_timestamp
-            ]
-            for key in old_patterns:
-                del self.pattern_memory[key]
-            print(f"🧹 {len(old_patterns)} eski pattern temizlendi")
-    
-    def _remove_least_used_pattern(self):
-        """En az kullanılan pattern'i sil"""
-        if not self.pattern_memory:
-            return
-        
-        min_count_pattern = min(self.pattern_memory.items(), key=lambda x: x[1]['count'])
-        del self.pattern_memory[min_count_pattern[0]]
-        print("🧹 En az kullanılan pattern silindi")
-    
-    def _calculate_trend(self, tuketimler):
-        """Trend hesaplama"""
-        if len(tuketimler) < 3:
-            return 0
-        return (tuketimler[-1] - tuketimler[0]) / tuketimler[0] if tuketimler[0] > 0 else 0
-
-    def gelismis_davranis_analizi(self, tesisat_verisi):
-        """Gelişmiş davranış analizi - öğrenme entegre"""
-        if len(tesisat_verisi) < 3:
-            return self._create_default_analysis("Yetersiz veri", "Orta", 0)
-        
-        tuketimler = tesisat_verisi['AKTIF_m3'].values
-        tarihler = tesisat_verisi['OKUMA_TARIHI']
-        
-        # İstatistiksel özellikler
-        sifir_sayisi = sum(tuketimler == 0)
-        sifir_orani = sifir_sayisi / len(tuketimler)
-        std_dev = np.std(tuketimler) if len(tuketimler) > 1 else 0
-        mean_tuketim = np.mean(tuketimler) if len(tuketimler) > 0 else 0
-        varyasyon_katsayisi = std_dev / mean_tuketim if mean_tuketim > 0 else 0
-        
-        # Trend analizi
-        trend_degeri = self._calculate_trend(tuketimler)
-        
-        # ÖĞRENİLMİŞ THRESHOLD'LAR ile risk puanı hesaplama
-        risk_puan = self._calculate_adaptive_risk_score(
-            sifir_sayisi, sifir_orani, varyasyon_katsayisi, 
-            trend_degeri, mean_tuketim, len(tuketimler)
-        )
+        # Öğrenilmiş pattern başarı oranları
+        success_rate = self.learning_data['success_rates'].get(features['pattern_type'], 0.7)
+        confidence_adjustment = (1 - success_rate) * 0.3  # Düşük başarı → daha yüksek risk
+        base_risk += confidence_adjustment
         
         # Risk seviyesi belirleme
-        risk_seviyesi = self._determine_risk_level(risk_puan)
+        base_risk = max(0.1, min(0.95, base_risk))
         
-        # Şüpheli dönem tespiti
-        supheli_donemler = self._find_suspicious_periods(tuketimler, tarihler, sifir_sayisi)
+        if base_risk > 0.7:
+            risk_seviyesi = "Yüksek"
+            risk_puan = 4
+            yorum = self._generate_risk_comment(features, "Yüksek")
+        elif base_risk > 0.4:
+            risk_seviyesi = "Orta" 
+            risk_puan = 2
+            yorum = self._generate_risk_comment(features, "Orta")
+        else:
+            risk_seviyesi = "Düşük"
+            risk_puan = 1
+            yorum = self._generate_risk_comment(features, "Düşük")
         
-        # ÖĞRENİLMİŞ YORUM oluşturma
-        yorum = self._adaptive_yorum_olustur(
-            risk_seviyesi, risk_puan, sifir_sayisi, 
-            varyasyon_katsayisi, trend_degeri, mean_tuketim
-        )
-        
-        # OTOMATİK ÖĞRENME
-        self.auto_learn_from_analysis(tesisat_verisi, {
-            'risk_seviyesi': risk_seviyesi,
-            'risk_puan': risk_puan,
-            'yorum': yorum
-        })
+        # Şüpheli dönemler
+        supheli_donemler = self._identify_suspicious_periods(features)
         
         return {
-            'yorum': yorum,
-            'supheli_donemler': supheli_donemler,
             'risk_seviyesi': risk_seviyesi,
             'risk_puan': risk_puan,
-            'std_dev': std_dev,
-            'mean_tuketim': mean_tuketim,
-            'pattern_data': {
-                'sifir_sayisi': sifir_sayisi,
-                'varyasyon_katsayisi': varyasyon_katsayisi,
-                'trend_degeri': trend_degeri,
-                'mean_tuketim': mean_tuketim
-            }
+            'yorum': yorum,
+            'supheli_donemler': supheli_donemler
         }
     
-    def _calculate_adaptive_risk_score(self, sifir_sayisi, sifir_orani, varyasyon_katsayisi, trend_degeri, mean_tuketim, data_length):
-        """Adaptive risk skoru hesaplama"""
-        risk_puan = 0
+    def _generate_risk_comment(self, features, risk_level):
+        """Risk seviyesine göre yorum oluştur"""
         
-        # 1. Sıfır tüketim analizi - adaptive threshold
-        if sifir_sayisi >= self.adaptive_thresholds['sifir_esik']:
-            risk_puan += 3
-        elif sifir_sayisi == 1:
-            risk_puan += 1
+        pattern_names = {
+            'sifir_aralikli': 'Aralıklı sıfır tüketim',
+            'yuksek_tuketim': 'Yüksek tüketim',
+            'degisken': 'Değişken tüketim',
+            'normal': 'Normal tüketim'
+        }
         
-        if sifir_orani > 0.5:
-            risk_puan += 2
+        pattern_desc = pattern_names.get(features['pattern_type'], 'Bilinmeyen pattern')
         
-        # 2. Varyasyon analizi - adaptive threshold
-        varyasyon_esik = self.adaptive_thresholds['varyasyon_esik']
-        if varyasyon_katsayisi > varyasyon_esik:
-            risk_puan += 2
-        elif varyasyon_katsayisi > varyasyon_esik * 0.7:
-            risk_puan += 1
-        
-        # 3. Trend analizi - adaptive threshold  
-        trend_esik = self.adaptive_thresholds['trend_esik']
-        if abs(trend_degeri) > trend_esik:
-            risk_puan += 2
-        elif abs(trend_degeri) > trend_esik * 0.7:
-            risk_puan += 1
-        
-        # 4. Anormal yüksek tüketim - adaptive threshold
-        yuksek_tuketim_esik = self.adaptive_thresholds['yuksek_tuketim_esik']
-        if mean_tuketim > yuksek_tuketim_esik:
-            risk_puan += 2
-        elif mean_tuketim > yuksek_tuketim_esik * 0.7:
-            risk_puan += 1
-        
-        return risk_puan
-    
-    def _determine_risk_level(self, risk_puan):
-        """Risk seviyesi belirleme"""
-        if risk_puan >= 5:
-            return "Yüksek"
-        elif risk_puan >= 3:
-            return "Orta"
-        else:
-            return "Düşük"
-    
-    def _find_suspicious_periods(self, tuketimler, tarihler, sifir_sayisi):
-        """Şüpheli dönemleri bul"""
-        supheli_donemler = []
-        if sifir_sayisi > 0:
-            for idx in np.where(tuketimler == 0)[0]:
-                if idx < len(tarihler):
-                    try:
-                        tarih_obj = pd.Timestamp(tarihler.iloc[idx])
-                        supheli_donemler.append(tarih_obj.strftime('%m/%Y'))
-                    except:
-                        continue
-        return ", ".join(supheli_donemler) if supheli_donemler else "Yok"
-    
-    def _adaptive_yorum_olustur(self, risk_seviyesi, risk_puan, sifir_sayisi, varyasyon_katsayisi, trend_degeri, mean_tuketim):
-        """Adaptive yorum oluşturma"""
-        
-        if risk_seviyesi == "Yüksek":
-            yorumlar = []
-            
-            if sifir_sayisi >= self.adaptive_thresholds['sifir_esik']:
-                yorumlar.append("Düzensiz sıfır tüketim paterni")
-            if varyasyon_katsayisi > self.adaptive_thresholds['varyasyon_esik']:
-                yorumlar.append("Yüksek tüketim dalgalanması")
-            if abs(trend_degeri) > self.adaptive_thresholds['trend_esik']:
-                yorumlar.append(f"{'Yükselen' if trend_degeri > 0 else 'Düşen'} tüketim trendi")
-            if mean_tuketim > self.adaptive_thresholds['yuksek_tuketim_esik']:
-                yorumlar.append("Anormal yüksek tüketim")
-            
-            if yorumlar:
-                return " | ".join(yorumlar) + " - Acil inceleme önerilir"
-            else:
-                return "Yüksek riskli tüketim paterni - İnceleme gerekli"
-        
-        elif risk_seviyesi == "Orta":
-            if sifir_sayisi == 1:
-                return "Tekil sıfır tüketim - İzleme gerektirir"
-            elif varyasyon_katsayisi > self.adaptive_thresholds['varyasyon_esik'] * 0.7:
-                return "Orta seviyede tüketim dalgalanması"
-            else:
-                return "Tüketim davranışında küçük tutarsızlıklar"
-        
-        else:
-            yorumlar = [
-                "Normal tüketim paterni",
-                "Stabil tüketim alışkanlığı", 
-                "Tutarlı tüketim davranışı"
+        comments = {
+            'Yüksek': [
+                f"🚨 {pattern_desc} tespit edildi. Acil inceleme önerilir.",
+                f"⚠️ Yüksek riskli {pattern_desc} patterni. Detaylı kontrol gerekli.",
+                f"🔴 {pattern_desc} nedeniyle yüksek risk seviyesi."
+            ],
+            'Orta': [
+                f"📊 {pattern_desc} gözlemlendi. Periyodik takip önerilir.", 
+                f"🟡 Orta riskli {pattern_desc} patterni. Gözlem altında tutulmalı.",
+                f"📈 {pattern_desc} nedeniyle orta risk seviyesi."
+            ],
+            'Düşük': [
+                f"✅ {pattern_desc} patterni. Düşük risk seviyesi.",
+                f"🟢 Normal {pattern_desc} davranışı. Risk seviyesi düşük.",
+                f"👍 {pattern_desc} nedeniyle düşük risk seviyesi."
             ]
-            return np.random.choice(yorumlar)
-    
-    def _create_default_analysis(self, yorum, risk_seviyesi, risk_puan):
-        """Varsayılan analiz oluştur"""
-        return {
-            'yorum': yorum,
-            'supheli_donemler': "Yok",
-            'risk_seviyesi': risk_seviyesi,
-            'risk_puan': risk_puan,
-            'std_dev': 0,
-            'mean_tuketim': 0
         }
+        
+        import random
+        return random.choice(comments[risk_level])
+    
+    def _identify_suspicious_periods(self, features):
+        """Şüpheli dönemleri belirle"""
+        
+        suspicious_items = []
+        
+        if features['zero_ratio'] > 0.3:
+            suspicious_items.append(f"%{features['zero_ratio']*100:.1f} sıfır tüketim")
+            
+        if features['variance'] > 0.7:
+            suspicious_items.append("yüksek değişkenlik")
+            
+        if features['max_consumption'] > 80:
+            suspicious_items.append("aşırı tüketim dönemleri")
+        
+        if suspicious_items:
+            return ", ".join(suspicious_items)
+        else:
+            return "Belirgin şüpheli dönem yok"
+    
+    def _update_learning(self, features, actual_risk):
+        """Öğrenme verisini güncelle"""
+        
+        # Pattern sayısını güncelle
+        pattern_type = features['pattern_type']
+        self.learning_data['pattern_counts'][pattern_type] += 1
+        
+        # Risk pattern'ini kaydet
+        self.learning_data['risk_patterns'][actual_risk].append(features)
+        
+        # Gözlem sayılarını güncelle
+        self.learning_data['total_observations'] += 1
+        self.learning_data['real_observations'] += 1
+        
+        # Başarı oranını güncelle (basit yaklaşım)
+        if actual_risk in ['Yüksek', 'Orta'] and features['pattern_type'] in ['sifir_aralikli', 'yuksek_tuketim']:
+            self.learning_data['successful_predictions'] += 1
+        elif actual_risk == 'Düşük' and features['pattern_type'] == 'normal':
+            self.learning_data['successful_predictions'] += 1
+        
+        # Adaptive threshold'ları güncelle
+        self._update_adaptive_thresholds()
+    
+    def _update_adaptive_thresholds(self):
+        """Adaptive threshold'ları güncelle"""
+        
+        # Mevcut pattern dağılımına göre threshold'ları ayarla
+        total_patterns = sum(self.learning_data['pattern_counts'].values())
+        
+        if total_patterns > 0:
+            zero_pattern_ratio = self.learning_data['pattern_counts']['sifir_aralikli'] / total_patterns
+            high_pattern_ratio = self.learning_data['pattern_counts']['yuksek_tuketim'] / total_patterns
+            
+            # Zero consumption threshold - daha fazla sıfır pattern varsa threshold'u düşür
+            new_zero_threshold = max(0.1, min(0.5, 0.3 - (zero_pattern_ratio - 0.2)))
+            
+            # High consumption threshold  
+            new_high_threshold = max(30, min(100, 50 + (high_pattern_ratio - 0.3) * 50))
+            
+            # Variance threshold
+            new_var_threshold = max(0.2, min(0.8, 0.4 + (zero_pattern_ratio - 0.2)))
+            
+            self.learning_data['adaptive_thresholds'].update({
+                'zero_consumption': new_zero_threshold,
+                'high_consumption': new_high_threshold, 
+                'variance_threshold': new_var_threshold
+            })
+    
+    def learn_from_feedback(self, tesisat_no, gercek_risk, tahmin_risk, metadata=None):
+        """Geri bildirimden öğrenme"""
+        
+        feedback_data = {
+            'tesisat_no': tesisat_no,
+            'gercek_risk': gercek_risk,
+            'tahmin_risk': tahmin_risk,
+            'timestamp': datetime.now(),
+            'metadata': metadata or {}
+        }
+        
+        self.learning_data['feedback_history'].append(feedback_data)
+        
+        # Başarı durumunu güncelle
+        if gercek_risk == tahmin_risk:
+            self.learning_data['successful_predictions'] += 1
+        
+        self.learning_data['total_observations'] += 1
+        
+        # Pattern başarı oranlarını güncelle
+        if 'pattern_type' in metadata:
+            pattern_type = metadata['pattern_type']
+            current_success = self.learning_data['success_rates'].get(pattern_type, 0.7)
+            
+            if gercek_risk == tahmin_risk:
+                new_success = current_success * 0.95 + 0.05  # Artan başarı
+            else:
+                new_success = current_success * 0.98 - 0.02  # Azalan başarı
+            
+            self.learning_data['success_rates'][pattern_type] = max(0.1, min(0.95, new_success))
     
     def get_learning_stats(self):
-        """Detaylı öğrenme istatistiklerini getir"""
-        if not self.performance_history:
-            return {
-                'toplam_gozlem': 0,
-                'gercek_gozlem': 0,
-                'basari_orani': 0,
-                'gercek_basari_orani': 0,
-                'adaptive_thresholds': self.adaptive_thresholds,
-                'model_version': '2.0-large-scale',
-                'status': 'Sentetik veri ile başlatıldı',
-                'pattern_memory_size': len(self.pattern_memory)
-            }
+        """Öğrenme istatistiklerini getir"""
         
-        toplam_gozlem = len(self.performance_history)
+        total_obs = self.learning_data['total_observations']
+        real_obs = self.learning_data['real_observations']
+        success_obs = self.learning_data['successful_predictions']
         
-        # Gerçek feedback'leri filtrele (sentetik olmayanlar)
-        real_feedbacks = [p for p in self.performance_history if not p.get('tesisat_no', '').startswith('SYNTHETIC_')]
-        real_basari_orani = sum([p['basari'] for p in real_feedbacks]) / len(real_feedbacks) if real_feedbacks else 0
+        basari_orani = success_obs / total_obs if total_obs > 0 else 0.7
         
-        # Tüm feedback'ler
-        total_basari_orani = sum([p['basari'] for p in self.performance_history]) / toplam_gozlem
+        # Pattern dağılımı
+        pattern_dagilimi = dict(self.learning_data['pattern_counts'])
+        
+        # Son feedback'ler
+        son_feedbackler = list(self.learning_data['feedback_history'])[-10:]  # Son 10 feedback
         
         return {
-            'toplam_gozlem': toplam_gozlem,
-            'gercek_gozlem': len(real_feedbacks),
-            'basari_orani': total_basari_orani,
-            'gercek_basari_orani': real_basari_orani,
-            'adaptive_thresholds': self.adaptive_thresholds,
-            'model_version': '2.0-large-scale',
-            'status': 'Aktif öğrenme modunda',
-            'pattern_memory_size': len(self.pattern_memory)
+            'toplam_gozlem': total_obs,
+            'gercek_gozlem': real_obs,
+            'basari_orani': basari_orani,
+            'ogrenme_hizi': real_obs / max(1, total_obs - real_obs),
+            'pattern_dagilimi': pattern_dagilimi,
+            'adaptive_thresholds': self.learning_data['adaptive_thresholds'],
+            'son_feedbackler': son_feedbackler
+        }
+    
+    def _default_analysis(self):
+        """Varsayılan analiz sonucu"""
+        return {
+            'yorum': 'Yetersiz veri nedeniyle temel analiz yapıldı',
+            'supheli_donemler': 'Yetersiz veri',
+            'risk_seviyesi': 'Orta',
+            'risk_puan': 2,
+            'pattern_data': {}
         }
 
-# Global adaptive model instance
-adaptive_model = AdaptiveSuTuketimModeli()
+# Global model instance
+adaptive_model = AdaptiveLearningModel()
